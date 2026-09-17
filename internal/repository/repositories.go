@@ -529,11 +529,16 @@ func (r *paymentRepo) GetRevenueByDays(days int) ([]map[string]interface{}, erro
 		Count int64   `json:"count"`
 	}
 
+	dateExpr := "TO_CHAR(paid_at, 'YYYY-MM-DD')"
+	if r.db.Dialector.Name() == "sqlite" {
+		dateExpr = "strftime('%Y-%m-%d', paid_at)"
+	}
+
 	var results []DailyRev
 	err := r.db.Model(&domain.Payment{}).
 		Where("paid_at >= ?", since).
-		Select("strftime('%Y-%m-%d', paid_at) as date, SUM(amount) as total, COUNT(id) as count").
-		Group("strftime('%Y-%m-%d', paid_at)").
+		Select(dateExpr + " as date, SUM(amount) as total, COUNT(id) as count").
+		Group(dateExpr).
 		Order("date asc").
 		Scan(&results).Error
 

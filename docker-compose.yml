@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: parking_backend
+    restart: always
+    ports:
+      - "8085:8085"
+    environment:
+      PORT: "8085"
+      DB_DRIVER: "postgres"
+      # Mavjud main-database konteyneriga delivery-network orqali ulanish:
+      DB_SOURCE: "postgres://sawab:sawab@main-database:5432/parking_db?sslmode=disable"
+      JWT_SECRET: "super-secret-smart-parking-jwt-key-2026"
+      UPLOAD_DIR: "./uploads"
+      FRONTEND_URL: "http://localhost:5173"
+      DEFAULT_BRANCH: "Markaziy Filial"
+    networks:
+      - delivery-network
+    volumes:
+      - backend_uploads:/root/uploads
+
+networks:
+  delivery-network:
+    external: true
+
+volumes:
+  backend_uploads:
