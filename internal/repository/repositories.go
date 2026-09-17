@@ -87,7 +87,10 @@ func (r *userRepo) Delete(id uuid.UUID) error {
 type BranchRepository interface {
 	GetFirst() (*domain.Branch, error)
 	GetByID(id uuid.UUID) (*domain.Branch, error)
+	List() ([]domain.Branch, error)
+	Create(branch *domain.Branch) error
 	Update(branch *domain.Branch) error
+	Delete(id uuid.UUID) error
 	UpdateOccupiedSpaces(id uuid.UUID, occupied int) error
 }
 
@@ -111,8 +114,22 @@ func (r *branchRepo) GetByID(id uuid.UUID) (*domain.Branch, error) {
 	return &branch, err
 }
 
+func (r *branchRepo) List() ([]domain.Branch, error) {
+	var branches []domain.Branch
+	err := r.db.Order("created_at asc").Find(&branches).Error
+	return branches, err
+}
+
+func (r *branchRepo) Create(branch *domain.Branch) error {
+	return r.db.Create(branch).Error
+}
+
 func (r *branchRepo) Update(branch *domain.Branch) error {
 	return r.db.Save(branch).Error
+}
+
+func (r *branchRepo) Delete(id uuid.UUID) error {
+	return r.db.Delete(&domain.Branch{}, "id = ?", id).Error
 }
 
 func (r *branchRepo) UpdateOccupiedSpaces(id uuid.UUID, occupied int) error {
@@ -122,12 +139,14 @@ func (r *branchRepo) UpdateOccupiedSpaces(id uuid.UUID, occupied int) error {
 // ---------------- CAMERA REPO ----------------
 type CameraRepository interface {
 	List() ([]domain.Camera, error)
+	ListByBranch(branchID uuid.UUID) ([]domain.Camera, error)
 	GetByID(id uuid.UUID) (*domain.Camera, error)
 	Create(cam *domain.Camera) error
 	Update(cam *domain.Camera) error
 	UpdateHeartbeat(id uuid.UUID) error
 	Delete(id uuid.UUID) error
 }
+
 
 type cameraRepo struct {
 	db *gorm.DB
@@ -140,6 +159,12 @@ func NewCameraRepository(db *gorm.DB) CameraRepository {
 func (r *cameraRepo) List() ([]domain.Camera, error) {
 	var cams []domain.Camera
 	err := r.db.Order("name asc").Find(&cams).Error
+	return cams, err
+}
+
+func (r *cameraRepo) ListByBranch(branchID uuid.UUID) ([]domain.Camera, error) {
+	var cams []domain.Camera
+	err := r.db.Where("branch_id = ?", branchID).Order("name asc").Find(&cams).Error
 	return cams, err
 }
 
@@ -173,7 +198,9 @@ type BarrierRepository interface {
 	List() ([]domain.Barrier, error)
 	GetByID(id uuid.UUID) (*domain.Barrier, error)
 	GetByDirection(direction domain.DirectionType) (*domain.Barrier, error)
+	Create(barrier *domain.Barrier) error
 	Update(barrier *domain.Barrier) error
+	Delete(id uuid.UUID) error
 	UpdateStatus(id uuid.UUID, status domain.BarrierStatus) error
 }
 
@@ -203,8 +230,16 @@ func (r *barrierRepo) GetByDirection(direction domain.DirectionType) (*domain.Ba
 	return &b, err
 }
 
+func (r *barrierRepo) Create(barrier *domain.Barrier) error {
+	return r.db.Create(barrier).Error
+}
+
 func (r *barrierRepo) Update(barrier *domain.Barrier) error {
 	return r.db.Save(barrier).Error
+}
+
+func (r *barrierRepo) Delete(id uuid.UUID) error {
+	return r.db.Delete(&domain.Barrier{}, "id = ?", id).Error
 }
 
 func (r *barrierRepo) UpdateStatus(id uuid.UUID, status domain.BarrierStatus) error {
@@ -329,6 +364,7 @@ func (r *tariffRepo) Delete(id uuid.UUID) error {
 
 // ---------------- PARKING SESSION REPO ----------------
 type SessionFilter struct {
+	BranchID    *uuid.UUID
 	PlateNumber string
 	Status      domain.SessionStatus
 	StartDate   *time.Time
@@ -345,10 +381,14 @@ type ParkingSessionRepository interface {
 	FindActiveByPlate(plate string) (*domain.ParkingSession, error)
 	List(filter SessionFilter) ([]domain.ParkingSession, int64, error)
 	CountActive() (int64, error)
+	CountActiveByBranch(branchID *uuid.UUID) (int64, error)
 	CountToday() (int64, error)
+	CountTodayByBranch(branchID *uuid.UUID) (int64, error)
 	GetAverageDurationMinutes() (float64, error)
+	GetAverageDurationByBranch(branchID *uuid.UUID) (float64, error)
 	GetVehicleHistory(plate string) ([]domain.ParkingSession, error)
 }
+
 
 type parkingSessionRepo struct {
 	db *gorm.DB
@@ -393,6 +433,9 @@ func (r *parkingSessionRepo) FindActiveByPlate(plate string) (*domain.ParkingSes
 func (r *parkingSessionRepo) List(filter SessionFilter) ([]domain.ParkingSession, int64, error) {
 	query := r.db.Model(&domain.ParkingSession{}).Preload("Tariff").Preload("Client").Preload("Payments")
 
+	if filter.BranchID != nil {
+		query = query.Where("branch_id = ?", *filter.BranchID)
+	}
 	if filter.PlateNumber != "" {
 		clean := strings.ToUpper(strings.ReplaceAll(filter.PlateNumber, " ", ""))
 		query = query.Where("REPLACE(UPPER(plate_number), ' ', '') LIKE ?", "%"+clean+"%")
@@ -433,11 +476,43 @@ func (r *parkingSessionRepo) CountActive() (int64, error) {
 	return count, err
 }
 
+func (r *parkingSessionRepo) CountActiveByBranch(branchID *uuid.UUID) (int64, error) {
+	var count int64
+	q := r.db.Model(&domain.ParkingSession{}).Where("status = ?", domain.SessionActive)
+	if branchID != nil {
+		q = q.Where("branch_id = ?", *branchID)
+	}
+	err := q.Count(&count).Error
+	return count, err
+}
+
 func (r *parkingSessionRepo) CountToday() (int64, error) {
 	startOfDay := time.Now().Truncate(24 * time.Hour)
 	var count int64
 	err := r.db.Model(&domain.ParkingSession{}).Where("entry_time >= ?", startOfDay).Count(&count).Error
 	return count, err
+}
+
+func (r *parkingSessionRepo) CountTodayByBranch(branchID *uuid.UUID) (int64, error) {
+	startOfDay := time.Now().Truncate(24 * time.Hour)
+	var count int64
+	q := r.db.Model(&domain.ParkingSession{}).Where("entry_time >= ?", startOfDay)
+	if branchID != nil {
+		q = q.Where("branch_id = ?", *branchID)
+	}
+	err := q.Count(&count).Error
+	return count, err
+}
+
+func (r *parkingSessionRepo) GetAverageDurationByBranch(branchID *uuid.UUID) (float64, error) {
+	var avg float64
+	q := r.db.Model(&domain.ParkingSession{}).
+		Where("status IN ? AND duration_min > 0", []domain.SessionStatus{domain.SessionCompleted, domain.SessionPaid})
+	if branchID != nil {
+		q = q.Where("branch_id = ?", *branchID)
+	}
+	err := q.Select("COALESCE(AVG(duration_min), 0)").Scan(&avg).Error
+	return avg, err
 }
 
 func (r *parkingSessionRepo) GetAverageDurationMinutes() (float64, error) {
@@ -465,8 +540,10 @@ type PaymentRepository interface {
 	GetByID(id uuid.UUID) (*domain.Payment, error)
 	List(page, limit int) ([]domain.Payment, int64, error)
 	GetTodayRevenue() (float64, error)
+	GetTodayRevenueByBranch(branchID *uuid.UUID) (float64, error)
 	GetRecentPayments(limit int) ([]domain.Payment, error)
 	GetRevenueByDays(days int) ([]map[string]interface{}, error)
+	GetRevenueByDaysByBranch(branchID *uuid.UUID, days int) ([]map[string]interface{}, error)
 }
 
 type paymentRepo struct {
@@ -514,6 +591,19 @@ func (r *paymentRepo) GetTodayRevenue() (float64, error) {
 	return total, err
 }
 
+func (r *paymentRepo) GetTodayRevenueByBranch(branchID *uuid.UUID) (float64, error) {
+	startOfDay := time.Now().Truncate(24 * time.Hour)
+	var total float64
+	q := r.db.Model(&domain.Payment{}).Where("paid_at >= ?", startOfDay)
+	if branchID != nil {
+		// Payment ga branch_id yo'q, session orqali filtrlash
+		q = q.Joins("JOIN parking_sessions ON parking_sessions.id = payments.session_id").
+			Where("parking_sessions.branch_id = ?", *branchID)
+	}
+	err := q.Select("COALESCE(SUM(payments.amount), 0)").Scan(&total).Error
+	return total, err
+}
+
 func (r *paymentRepo) GetRecentPayments(limit int) ([]domain.Payment, error) {
 	var payments []domain.Payment
 	err := r.db.Order("paid_at desc").Limit(limit).Find(&payments).Error
@@ -521,23 +611,31 @@ func (r *paymentRepo) GetRecentPayments(limit int) ([]domain.Payment, error) {
 }
 
 func (r *paymentRepo) GetRevenueByDays(days int) ([]map[string]interface{}, error) {
+	return r.GetRevenueByDaysByBranch(nil, days)
+}
+
+func (r *paymentRepo) GetRevenueByDaysByBranch(branchID *uuid.UUID, days int) ([]map[string]interface{}, error) {
 	since := time.Now().AddDate(0, 0, -days).Truncate(24 * time.Hour)
-	
+
 	type DailyRev struct {
 		Date  string  `json:"date"`
 		Total float64 `json:"total"`
 		Count int64   `json:"count"`
 	}
 
-	dateExpr := "TO_CHAR(paid_at, 'YYYY-MM-DD')"
+	dateExpr := "TO_CHAR(payments.paid_at, 'YYYY-MM-DD')"
 	if r.db.Dialector.Name() == "sqlite" {
-		dateExpr = "strftime('%Y-%m-%d', paid_at)"
+		dateExpr = "strftime('%Y-%m-%d', payments.paid_at)"
+	}
+
+	q := r.db.Model(&domain.Payment{}).Where("payments.paid_at >= ?", since)
+	if branchID != nil {
+		q = q.Joins("JOIN parking_sessions ON parking_sessions.id = payments.session_id").
+			Where("parking_sessions.branch_id = ?", *branchID)
 	}
 
 	var results []DailyRev
-	err := r.db.Model(&domain.Payment{}).
-		Where("paid_at >= ?", since).
-		Select(dateExpr + " as date, SUM(amount) as total, COUNT(id) as count").
+	err := q.Select(dateExpr + " as date, SUM(payments.amount) as total, COUNT(payments.id) as count").
 		Group(dateExpr).
 		Order("date asc").
 		Scan(&results).Error

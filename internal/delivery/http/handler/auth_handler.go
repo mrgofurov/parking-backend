@@ -55,6 +55,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 			"full_name": user.FullName,
 			"role":      user.Role,
 			"branch_id": user.BranchID,
+			"active":    user.Active,
 		},
 	}, "Muvaffaqiyatli tizimga kirildi")
 }
@@ -76,6 +77,7 @@ func (h *AuthHandler) GetMe(c *fiber.Ctx) error {
 		"full_name": user.FullName,
 		"role":      user.Role,
 		"branch_id": user.BranchID,
+		"active":    user.Active,
 	})
 }
 
@@ -92,6 +94,7 @@ type CreateUserRequest struct {
 	Password string          `json:"password"`
 	FullName string          `json:"full_name"`
 	Role     domain.UserRole `json:"role"`
+	BranchID *uuid.UUID      `json:"branch_id"`
 }
 
 func (h *AuthHandler) CreateUser(c *fiber.Ctx) error {
@@ -115,6 +118,7 @@ func (h *AuthHandler) CreateUser(c *fiber.Ctx) error {
 		Password:  hashed,
 		FullName:  req.FullName,
 		Role:      req.Role,
+		BranchID:  req.BranchID,
 		Active:    true,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -125,6 +129,59 @@ func (h *AuthHandler) CreateUser(c *fiber.Ctx) error {
 	}
 
 	return response.Created(c, user, "Foydalanuvchi yaratildi")
+}
+
+type UpdateUserRequest struct {
+	FullName string          `json:"full_name"`
+	Role     domain.UserRole `json:"role"`
+	BranchID *uuid.UUID      `json:"branch_id"`
+	Active   *bool           `json:"active"`
+	Password string          `json:"password"`
+}
+
+func (h *AuthHandler) UpdateUser(c *fiber.Ctx) error {
+	idStr := c.Params("id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Yaroqsiz ID")
+	}
+
+	user, err := h.repo.GetByID(id)
+	if err != nil {
+		return response.Error(c, fiber.StatusNotFound, "Foydalanuvchi topilmadi")
+	}
+
+	var req UpdateUserRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.Error(c, fiber.StatusBadRequest, "Ma'lumotlar formati noto'g'ri")
+	}
+
+	if req.FullName != "" {
+		user.FullName = req.FullName
+	}
+	if req.Role != "" {
+		user.Role = req.Role
+	}
+	// branch_id explicitly set (even to nil to unassign)
+	user.BranchID = req.BranchID
+
+	if req.Active != nil {
+		user.Active = *req.Active
+	}
+	if req.Password != "" {
+		hashed, err := password.HashPassword(req.Password)
+		if err != nil {
+			return response.Error(c, fiber.StatusInternalServerError, "Parolni shifrlashda xatolik")
+		}
+		user.Password = hashed
+	}
+	user.UpdatedAt = time.Now()
+
+	if err := h.repo.Update(user); err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+	}
+
+	return response.Success(c, user, "Foydalanuvchi ma'lumotlari yangilandi")
 }
 
 func (h *AuthHandler) DeleteUser(c *fiber.Ctx) error {

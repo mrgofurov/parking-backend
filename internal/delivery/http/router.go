@@ -40,7 +40,7 @@ func SetupRoutes(
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     "*",
 		AllowMethods:     "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Branch-ID",
 		AllowCredentials: false,
 	}))
 
@@ -56,7 +56,7 @@ func SetupRoutes(
 		Tariff:  handler.NewTariffHandler(services.Tariff),
 		Payment: handler.NewPaymentHandler(services.Payment),
 		Barrier: handler.NewBarrierHandler(services.Barrier),
-		Camera:  handler.NewCameraHandler(repos.Camera),
+		Camera:  handler.NewCameraHandler(repos.Camera, repos.Branch),
 		Report:  handler.NewReportHandler(services.Report, repos.Branch),
 		WS:      handler.NewWSHandler(services.Hub),
 	}
@@ -88,6 +88,7 @@ func SetupRoutes(
 	adminMW := middleware.RequireRole(domain.RoleAdmin)
 	protected.Get("/users", adminMW, h.Auth.ListUsers)
 	protected.Post("/users", adminMW, h.Auth.CreateUser)
+	protected.Put("/users/:id", adminMW, h.Auth.UpdateUser)
 	protected.Delete("/users/:id", adminMW, h.Auth.DeleteUser)
 
 	// Parking Sessions
@@ -118,6 +119,10 @@ func SetupRoutes(
 
 	// Barriers
 	protected.Get("/barriers", h.Barrier.ListBarriers)
+	protected.Post("/barriers", h.Barrier.CreateBarrier)
+	protected.Put("/barriers/:id", h.Barrier.UpdateBarrier)
+	protected.Delete("/barriers/:id", h.Barrier.DeleteBarrier)
+	protected.Post("/barriers/:id/ping", h.Barrier.PingBarrier)
 	protected.Post("/barriers/:id/open", h.Barrier.OpenBarrier)
 	protected.Post("/barriers/:id/close", h.Barrier.CloseBarrier)
 	protected.Post("/barriers/:id/car-passed", h.Barrier.CarPassed)
@@ -125,6 +130,7 @@ func SetupRoutes(
 	// Cameras
 	protected.Get("/cameras", h.Camera.ListCameras)
 	protected.Post("/cameras", adminMW, h.Camera.CreateCamera)
+	protected.Put("/cameras/:id", adminMW, h.Camera.UpdateCamera)
 	protected.Post("/cameras/:id/ping", h.Camera.PingCamera)
 	protected.Delete("/cameras/:id", adminMW, h.Camera.DeleteCamera)
 
@@ -132,9 +138,16 @@ func SetupRoutes(
 	protected.Get("/reports/dashboard", h.Report.GetDashboardStats)
 	protected.Get("/reports/revenue", h.Report.GetRevenueTrends)
 
-	// Branch Settings
+	// Branch Settings (backward compat)
 	protected.Get("/settings/branch", h.Report.GetBranchSettings)
 	protected.Put("/settings/branch", adminMW, h.Report.UpdateBranchSettings)
+
+	// Branches CRUD (Multi-Branch)
+	protected.Get("/branches", h.Report.ListBranches)
+	protected.Post("/branches", adminMW, h.Report.CreateBranch)
+	protected.Get("/branches/:id", h.Report.GetBranch)
+	protected.Put("/branches/:id", adminMW, h.Report.UpdateBranch)
+	protected.Delete("/branches/:id", adminMW, h.Report.DeleteBranch)
 }
 
 type Services struct {

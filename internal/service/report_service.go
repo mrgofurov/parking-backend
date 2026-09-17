@@ -1,6 +1,7 @@
 package service
 
 import (
+	"github.com/google/uuid"
 	"github.com/smart-parking/parking-backend/internal/domain"
 	"github.com/smart-parking/parking-backend/internal/repository"
 )
@@ -14,11 +15,12 @@ type DashboardStats struct {
 	TodayTotalVehicles int64                   `json:"today_total_vehicles"`
 	AvgDurationMin     float64                 `json:"avg_duration_min"`
 	RecentActivity     []domain.ParkingSession `json:"recent_activity"`
+	BranchID           *uuid.UUID              `json:"branch_id,omitempty"`
 }
 
 type ReportService interface {
-	GetDashboardStats() (*DashboardStats, error)
-	GetRevenueTrends(days int) ([]map[string]interface{}, error)
+	GetDashboardStats(branchID *uuid.UUID) (*DashboardStats, error)
+	GetRevenueTrends(branchID *uuid.UUID, days int) ([]map[string]interface{}, error)
 }
 
 type reportService struct {
@@ -29,30 +31,50 @@ func NewReportService(repos *repository.RepositoryContainer) ReportService {
 	return &reportService{repos: repos}
 }
 
-func (s *reportService) GetDashboardStats() (*DashboardStats, error) {
-	activeCount, _ := s.repos.ParkingSession.CountActive()
-	todayVehicles, _ := s.repos.ParkingSession.CountToday()
-	todayRevenue, _ := s.repos.Payment.GetTodayRevenue()
-	avgDuration, _ := s.repos.ParkingSession.GetAverageDurationMinutes()
+func (s *reportService) GetDashboardStats(branchID *uuid.UUID) (*DashboardStats, error) {
+	activeCount, _ := s.repos.ParkingSession.CountActiveByBranch(branchID)
+	todayVehicles, _ := s.repos.ParkingSession.CountTodayByBranch(branchID)
+	todayRevenue, _ := s.repos.Payment.GetTodayRevenueByBranch(branchID)
+	avgDuration, _ := s.repos.ParkingSession.GetAverageDurationByBranch(branchID)
 
-	branch, _ := s.repos.Branch.GetFirst()
-	totalSpaces := 100
-	occupiedSpaces := int(activeCount)
-	if branch != nil {
-		totalSpaces = branch.TotalSpaces
-		occupiedSpaces = branch.OccupiedSpaces
+	var totalSpaces int
+	var occupiedSpaces int
+
+	if branchID != nil {
+		// Tanlangan filial uchun
+		branch, err := s.repos.Branch.GetByID(*branchID)
+		if err == nil && branch != nil {
+			totalSpaces = branch.TotalSpaces
+			occupiedSpaces = branch.OccupiedSpaces
+			if occupiedSpaces < int(activeCount) {
+				occupiedSpaces = int(activeCount)
+			}
+		}
+	} else {
+		// Barcha filiallar uchun yig'indisi
+		branches, _ := s.repos.Branch.List()
+		for _, b := range branches {
+			totalSpaces += b.TotalSpaces
+			occupiedSpaces += b.OccupiedSpaces
+		}
 		if occupiedSpaces < int(activeCount) {
 			occupiedSpaces = int(activeCount)
 		}
 	}
+
+	if totalSpaces == 0 {
+		totalSpaces = 100
+	}
+
 	availableSpaces := totalSpaces - occupiedSpaces
 	if availableSpaces < 0 {
 		availableSpaces = 0
 	}
 
 	recentSessions, _, _ := s.repos.ParkingSession.List(repository.SessionFilter{
-		Page:  1,
-		Limit: 8,
+		BranchID: branchID,
+		Page:     1,
+		Limit:    8,
 	})
 
 	return &DashboardStats{
@@ -64,12 +86,13 @@ func (s *reportService) GetDashboardStats() (*DashboardStats, error) {
 		TodayTotalVehicles: todayVehicles,
 		AvgDurationMin:     avgDuration,
 		RecentActivity:     recentSessions,
+		BranchID:           branchID,
 	}, nil
 }
 
-func (s *reportService) GetRevenueTrends(days int) ([]map[string]interface{}, error) {
+func (s *reportService) GetRevenueTrends(branchID *uuid.UUID, days int) ([]map[string]interface{}, error) {
 	if days <= 0 {
 		days = 7
 	}
-	return s.repos.Payment.GetRevenueByDays(days)
+	return s.repos.Payment.GetRevenueByDaysByBranch(branchID, days)
 }
