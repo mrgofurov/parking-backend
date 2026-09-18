@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -292,10 +293,13 @@ func (s *anprService) saveSnapshot(plate, base64Data string) (string, error) {
 	parts := strings.Split(base64Data, ",")
 	rawData := parts[len(parts)-1]
 
-	decoded, err := hex.DecodeString(rawData)
+	decoded, err := base64.StdEncoding.DecodeString(rawData)
 	if err != nil {
-		// Try standard base64 if not hex
-		return "", err
+		// Try hex if not standard base64
+		decoded, err = hex.DecodeString(rawData)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	filename := fmt.Sprintf("%s_%d.jpg", plate, time.Now().UnixNano())
