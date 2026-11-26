@@ -8,13 +8,31 @@ import (
 )
 
 type Config struct {
-	Port         string
-	DBDriver     string // "postgres" or "sqlite"
-	DBSource     string
-	JWTSecret    string
-	UploadDir    string
-	FrontendURL  string
+	Port          string
+	DBDriver      string // "postgres" or "sqlite"
+	DBSource      string
+	JWTSecret     string
+	UploadDir     string
+	FrontendURL   string
 	DefaultBranch string
+
+	// ANPR webhook protection (optional). When set, cameras / capture service
+	// must send it as ?token=… or X-ANPR-Token header.
+	ANPRWebhookToken string
+
+	// Exit flow
+	ExitGraceMinutes    int // a session paid this recently opens the exit barrier without new charge
+	PaymentQRTTLMinutes int // how long a generated QR stays payable
+	PaymentPollSeconds  int // how often pending Munis payments are checked
+
+	// Munis (UzQR). Mode: "live" | "mock" | "off". Empty = live when configured, else off.
+	MunisMode        string
+	MunisApiURL      string
+	MunisApiUsername string
+	MunisApiPassword string
+	MunisQRApiURL    string
+	MunisQRAuthToken string
+	MunisOriginalQR  string
 }
 
 func LoadConfig() *Config {
@@ -39,6 +57,20 @@ func LoadConfig() *Config {
 		UploadDir:     uploadDir,
 		FrontendURL:   frontendURL,
 		DefaultBranch: defaultBranch,
+
+		ANPRWebhookToken: getEnv("ANPR_WEBHOOK_TOKEN", ""),
+
+		ExitGraceMinutes:    getEnvAsInt("EXIT_GRACE_MINUTES", 15),
+		PaymentQRTTLMinutes: getEnvAsInt("PAYMENT_QR_TTL_MINUTES", 15),
+		PaymentPollSeconds:  getEnvAsInt("PAYMENT_POLL_SECONDS", 3),
+
+		MunisMode:        getEnv("MUNIS_MODE", ""),
+		MunisApiURL:      getEnv("MUNIS_API_URL", ""),
+		MunisApiUsername: getEnv("MUNIS_API_USERNAME", ""),
+		MunisApiPassword: getEnv("MUNIS_API_PASSWORD", ""),
+		MunisQRApiURL:    getEnv("MUNIS_QR_API_URL", ""),
+		MunisQRAuthToken: getEnv("MUNIS_QR_AUTH_TOKEN", ""),
+		MunisOriginalQR:  getEnv("MUNIS_ORIGINAL_QR", ""),
 	}
 }
 

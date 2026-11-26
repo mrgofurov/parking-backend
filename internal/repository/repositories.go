@@ -18,6 +18,7 @@ type RepositoryContainer struct {
 	Tariff         TariffRepository
 	ParkingSession ParkingSessionRepository
 	Payment        PaymentRepository
+	PaymentRequest PaymentRequestRepository
 	AuditLog       AuditLogRepository
 }
 
@@ -31,6 +32,7 @@ func NewRepositoryContainer(db *gorm.DB) *RepositoryContainer {
 		Tariff:         NewTariffRepository(db),
 		ParkingSession: NewParkingSessionRepository(db),
 		Payment:        NewPaymentRepository(db),
+		PaymentRequest: NewPaymentRequestRepository(db),
 		AuditLog:       NewAuditLogRepository(db),
 	}
 }
@@ -143,10 +145,11 @@ type CameraRepository interface {
 	GetByID(id uuid.UUID) (*domain.Camera, error)
 	Create(cam *domain.Camera) error
 	Update(cam *domain.Camera) error
+	GetByCode(code string) (*domain.Camera, error)
+	GetByIP(ip string) (*domain.Camera, error)
 	UpdateHeartbeat(id uuid.UUID) error
 	Delete(id uuid.UUID) error
 }
-
 
 type cameraRepo struct {
 	db *gorm.DB
@@ -174,6 +177,24 @@ func (r *cameraRepo) GetByID(id uuid.UUID) (*domain.Camera, error) {
 	return &cam, err
 }
 
+func (r *cameraRepo) GetByCode(code string) (*domain.Camera, error) {
+	var cam domain.Camera
+	err := r.db.First(&cam, "LOWER(code) = LOWER(?)", code).Error
+	if err != nil {
+		return nil, err
+	}
+	return &cam, nil
+}
+
+func (r *cameraRepo) GetByIP(ip string) (*domain.Camera, error) {
+	var cam domain.Camera
+	err := r.db.First(&cam, "ip_address = ?", ip).Error
+	if err != nil {
+		return nil, err
+	}
+	return &cam, nil
+}
+
 func (r *cameraRepo) Create(cam *domain.Camera) error {
 	return r.db.Create(cam).Error
 }
@@ -198,6 +219,7 @@ type BarrierRepository interface {
 	List() ([]domain.Barrier, error)
 	GetByID(id uuid.UUID) (*domain.Barrier, error)
 	GetByDirection(direction domain.DirectionType) (*domain.Barrier, error)
+	GetByBranchDirection(branchID uuid.UUID, direction domain.DirectionType) (*domain.Barrier, error)
 	Create(barrier *domain.Barrier) error
 	Update(barrier *domain.Barrier) error
 	Delete(id uuid.UUID) error
@@ -228,6 +250,15 @@ func (r *barrierRepo) GetByDirection(direction domain.DirectionType) (*domain.Ba
 	var b domain.Barrier
 	err := r.db.First(&b, "direction = ?", direction).Error
 	return &b, err
+}
+
+func (r *barrierRepo) GetByBranchDirection(branchID uuid.UUID, direction domain.DirectionType) (*domain.Barrier, error) {
+	var b domain.Barrier
+	err := r.db.Order("created_at asc").First(&b, "branch_id = ? AND direction = ?", branchID, direction).Error
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
 }
 
 func (r *barrierRepo) Create(barrier *domain.Barrier) error {
@@ -379,6 +410,7 @@ type ParkingSessionRepository interface {
 	GetByID(id uuid.UUID) (*domain.ParkingSession, error)
 	GetBySessionCode(code string) (*domain.ParkingSession, error)
 	FindActiveByPlate(plate string) (*domain.ParkingSession, error)
+	FindRecentlyClosedByPlate(plate string, since time.Time) (*domain.ParkingSession, error)
 	List(filter SessionFilter) ([]domain.ParkingSession, int64, error)
 	CountActive() (int64, error)
 	CountActiveByBranch(branchID *uuid.UUID) (int64, error)
@@ -388,7 +420,6 @@ type ParkingSessionRepository interface {
 	GetAverageDurationByBranch(branchID *uuid.UUID) (float64, error)
 	GetVehicleHistory(plate string) ([]domain.ParkingSession, error)
 }
-
 
 type parkingSessionRepo struct {
 	db *gorm.DB
@@ -423,6 +454,22 @@ func (r *parkingSessionRepo) FindActiveByPlate(plate string) (*domain.ParkingSes
 	var session domain.ParkingSession
 	err := r.db.Preload("Tariff").Preload("Client").
 		Where("REPLACE(UPPER(plate_number), ' ', '') = ? AND status = ?", cleanPlate, domain.SessionActive).
+		First(&session).Error
+	if err != nil {
+		return nil, err
+	}
+	return &session, nil
+}
+
+// FindRecentlyClosedByPlate returns the latest session of plate that was paid /
+// completed after since (used to let a car that already paid leave).
+func (r *parkingSessionRepo) FindRecentlyClosedByPlate(plate string, since time.Time) (*domain.ParkingSession, error) {
+	cleanPlate := strings.ToUpper(strings.ReplaceAll(plate, " ", ""))
+	var session domain.ParkingSession
+	err := r.db.Preload("Tariff").Preload("Client").
+		Where("REPLACE(UPPER(plate_number), ' ', '') = ? AND status IN ? AND updated_at >= ?",
+			cleanPlate, []domain.SessionStatus{domain.SessionPaid, domain.SessionCompleted}, since).
+		Order("updated_at desc").
 		First(&session).Error
 	if err != nil {
 		return nil, err
@@ -673,4 +720,77 @@ func (r *auditLogRepo) List(limit int) ([]domain.AuditLog, error) {
 	var logs []domain.AuditLog
 	err := r.db.Order("created_at desc").Limit(limit).Find(&logs).Error
 	return logs, err
+}
+
+// ---------------- PAYMENT REQUEST REPO ----------------
+type PaymentRequestRepository interface {
+	Create(pr *domain.PaymentRequest) error
+	Update(pr *domain.PaymentRequest) error
+	GetByID(id uuid.UUID) (*domain.PaymentRequest, error)
+	ListPending() ([]domain.PaymentRequest, error)
+	List(status string, limit int) ([]domain.PaymentRequest, error)
+	GetPendingBySession(sessionID uuid.UUID) (*domain.PaymentRequest, error)
+	// MarkStatus atomically moves a request from one status to another and
+	// reports whether this call won (protects against double-completion).
+	MarkStatus(id uuid.UUID, from, to domain.PaymentRequestStatus) (bool, error)
+}
+
+type paymentRequestRepo struct {
+	db *gorm.DB
+}
+
+func NewPaymentRequestRepository(db *gorm.DB) PaymentRequestRepository {
+	return &paymentRequestRepo{db: db}
+}
+
+func (r *paymentRequestRepo) Create(pr *domain.PaymentRequest) error {
+	return r.db.Create(pr).Error
+}
+
+func (r *paymentRequestRepo) Update(pr *domain.PaymentRequest) error {
+	return r.db.Save(pr).Error
+}
+
+func (r *paymentRequestRepo) GetByID(id uuid.UUID) (*domain.PaymentRequest, error) {
+	var pr domain.PaymentRequest
+	if err := r.db.First(&pr, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
+
+func (r *paymentRequestRepo) ListPending() ([]domain.PaymentRequest, error) {
+	var list []domain.PaymentRequest
+	err := r.db.Where("status = ?", domain.PaymentRequestPending).Order("created_at asc").Find(&list).Error
+	return list, err
+}
+
+func (r *paymentRequestRepo) List(status string, limit int) ([]domain.PaymentRequest, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := r.db.Order("created_at desc").Limit(limit)
+	if status != "" {
+		q = q.Where("status = ?", status)
+	}
+	var list []domain.PaymentRequest
+	err := q.Find(&list).Error
+	return list, err
+}
+
+func (r *paymentRequestRepo) GetPendingBySession(sessionID uuid.UUID) (*domain.PaymentRequest, error) {
+	var pr domain.PaymentRequest
+	err := r.db.Where("session_id = ? AND status = ?", sessionID, domain.PaymentRequestPending).
+		Order("created_at desc").First(&pr).Error
+	if err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
+
+func (r *paymentRequestRepo) MarkStatus(id uuid.UUID, from, to domain.PaymentRequestStatus) (bool, error) {
+	res := r.db.Model(&domain.PaymentRequest{}).
+		Where("id = ? AND status = ?", id, from).
+		Updates(map[string]interface{}{"status": to, "updated_at": time.Now()})
+	return res.RowsAffected == 1, res.Error
 }

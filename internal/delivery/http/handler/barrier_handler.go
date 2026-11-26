@@ -40,7 +40,7 @@ func (h *BarrierHandler) OpenBarrier(c *fiber.Ctx) error {
 	}
 
 	if err := h.barrierSvc.OpenBarrier(id, req.Reason); err != nil {
-		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+		return response.Error(c, fiber.StatusBadGateway, err.Error())
 	}
 
 	return response.Success(c, nil, "Shlagbaum ochildi")
@@ -52,11 +52,16 @@ func (h *BarrierHandler) CloseBarrier(c *fiber.Ctx) error {
 		return response.Error(c, fiber.StatusBadRequest, "Yaroqsiz ID")
 	}
 
-	if err := h.barrierSvc.CloseBarrier(id); err != nil {
-		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+	var req BarrierOpenRequest
+	_ = c.BodyParser(&req)
+	if req.Reason == "" {
+		req.Reason = "Operator tomonidan yopildi"
 	}
-
-	return response.Success(c, nil, "Shlagbaum yopildi")
+	res, err := h.barrierSvc.CloseBarrier(id, req.Reason)
+	if err != nil {
+		return response.Error(c, fiber.StatusBadGateway, err.Error())
+	}
+	return response.Success(c, res, res.Message)
 }
 
 // Induction loop sensor or button triggering "Car Passed"
@@ -66,11 +71,11 @@ func (h *BarrierHandler) CarPassed(c *fiber.Ctx) error {
 		return response.Error(c, fiber.StatusBadRequest, "Yaroqsiz ID")
 	}
 
-	if err := h.barrierSvc.CarPassed(id); err != nil {
-		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+	res, err := h.barrierSvc.CarPassed(id)
+	if err != nil {
+		return response.Error(c, fiber.StatusBadGateway, err.Error())
 	}
-
-	return response.Success(c, nil, "Avtomobil o'tishi qayd etildi, shlagbaum yopildi")
+	return response.Success(c, res, "Mashina o'tdi: "+res.Message)
 }
 
 func (h *BarrierHandler) CreateBarrier(c *fiber.Ctx) error {
@@ -132,4 +137,3 @@ func (h *BarrierHandler) PingBarrier(c *fiber.Ctx) error {
 
 	return response.Success(c, res, "Shlagbaum relay aloqasi tekshirildi")
 }
-

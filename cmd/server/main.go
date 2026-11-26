@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
@@ -33,19 +34,26 @@ func main() {
 	wsHub := service.NewWebSocketHub()
 	barrierSvc := service.NewBarrierService(repos.Barrier, wsHub)
 	tariffSvc := service.NewTariffService(repos.Tariff)
-	anprSvc := service.NewANPRService(repos, tariffSvc, barrierSvc, wsHub, cfg.UploadDir)
+	displaySvc := service.NewDisplayService(wsHub)
 	sessionSvc := service.NewSessionService(repos, tariffSvc, barrierSvc, wsHub)
-	paymentSvc := service.NewPaymentService(repos, barrierSvc, wsHub)
+	paymentSvc := service.NewPaymentService(repos, barrierSvc, displaySvc, wsHub)
+	qrSvc := service.NewQRPaymentService(cfg, repos, paymentSvc, displaySvc)
+	anprSvc := service.NewANPRService(cfg, repos, tariffSvc, barrierSvc, qrSvc, displaySvc, wsHub)
 	reportSvc := service.NewReportService(repos)
 
+	// Background watcher for Munis QR payments
+	go qrSvc.Run(context.Background())
+
 	services := &httpdelivery.Services{
-		Hub:     wsHub,
-		Barrier: barrierSvc,
-		Tariff:  tariffSvc,
-		ANPR:    anprSvc,
-		Session: sessionSvc,
-		Payment: paymentSvc,
-		Report:  reportSvc,
+		Hub:       wsHub,
+		Barrier:   barrierSvc,
+		Tariff:    tariffSvc,
+		ANPR:      anprSvc,
+		Session:   sessionSvc,
+		Payment:   paymentSvc,
+		Report:    reportSvc,
+		Display:   displaySvc,
+		QRPayment: qrSvc,
 	}
 
 	// 5. Fiber App & Routes

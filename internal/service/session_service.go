@@ -64,20 +64,27 @@ func (s *sessionService) ManualClose(sessionID uuid.UUID, reason string) error {
 	}
 	session.Notes = session.Notes + " [Operator tomonidan qo'lda yopildi: " + reason + "]"
 	session.UpdatedAt = now
+	session.Payments = nil
 
 	if err := s.repos.ParkingSession.Update(session); err != nil {
 		return err
 	}
 
+	// Any QR still shown for this session is void now.
+	if pending, err := s.repos.PaymentRequest.GetPendingBySession(session.ID); err == nil && pending != nil {
+		_, _ = s.repos.PaymentRequest.MarkStatus(pending.ID, domain.PaymentRequestPending, domain.PaymentRequestCancelled)
+	}
+
 	// Decrement occupancy
-	branch, _ := s.repos.Branch.GetFirst()
+	branch, _ := s.repos.Branch.GetByID(session.BranchID)
 	if branch != nil {
-		activeCount, _ := s.repos.ParkingSession.CountActive()
+		activeCount, _ := s.repos.ParkingSession.CountActiveByBranch(&branch.ID)
 		_ = s.repos.Branch.UpdateOccupiedSpaces(branch.ID, int(activeCount))
 
 		s.hub.Broadcast(WSEventOccupancyUpdate, map[string]interface{}{
-			"occupied_spaces": activeCount,
-			"total_spaces":    branch.TotalSpaces,
+			"branch_id":        branch.ID,
+			"occupied_spaces":  activeCount,
+			"total_spaces":     branch.TotalSpaces,
 			"available_spaces": branch.TotalSpaces - int(activeCount),
 		})
 	}

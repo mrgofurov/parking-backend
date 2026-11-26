@@ -40,6 +40,7 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 		&domain.Tariff{},
 		&domain.ParkingSession{},
 		&domain.Payment{},
+		&domain.PaymentRequest{},
 		&domain.AuditLog{},
 	)
 	if err != nil {
@@ -48,8 +49,39 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 
 	// Seed default data
 	seedDefaultData(db, cfg)
+	backfillDeviceDefaults(db)
 
 	return db, nil
+}
+
+// backfillDeviceDefaults upgrades rows created before cameras had a code /
+// source and barriers had a control type.
+func backfillDeviceDefaults(db *gorm.DB) {
+	// Cameras: give the first entry / exit camera the codes the capture service uses.
+	for _, d := range []struct {
+		dir  domain.DirectionType
+		code string
+	}{{domain.DirectionEntry, "cam-entry"}, {domain.DirectionExit, "cam-exit"}} {
+		var taken int64
+		db.Model(&domain.Camera{}).Where("code = ?", d.code).Count(&taken)
+		if taken > 0 {
+			continue
+		}
+		var cam domain.Camera
+		if err := db.Where("direction = ? AND (code IS NULL OR code = '')", d.dir).Order("created_at asc").First(&cam).Error; err == nil {
+			db.Model(&domain.Camera{}).Where("id = ?", cam.ID).Update("code", d.code)
+			log.Printf("[Database] Camera %q code=%s\n", cam.Name, d.code)
+		}
+	}
+	db.Model(&domain.Camera{}).Where("source IS NULL OR source = ''").Update("source", domain.CameraSourceHikvision)
+
+	// Barriers: the demo seed pointed at non-existent relays — switch those to
+	// software mode so the simulator works until real hardware is configured.
+	db.Model(&domain.Barrier{}).
+		Where("relay_url IN ?", []string{"http://192.168.1.201/relay/open", "http://192.168.1.202/relay/open"}).
+		Updates(map[string]interface{}{"control_type": domain.BarrierControlNone, "relay_url": ""})
+	db.Model(&domain.Barrier{}).Where("control_type IS NULL OR control_type = ''").Update("control_type", domain.BarrierControlHTTPRelay)
+	db.Model(&domain.Barrier{}).Where("output_id IS NULL OR output_id = 0").Update("output_id", 1)
 }
 
 func seedDefaultData(db *gorm.DB, cfg *config.Config) {
@@ -135,6 +167,8 @@ func seedDefaultData(db *gorm.DB, cfg *config.Config) {
 			Name:          "Kirish ANPR Kamera (Yo'lak 1)",
 			BranchID:      branch.ID,
 			Direction:     domain.DirectionEntry,
+			Code:          "cam-entry",
+			Source:        domain.CameraSourceHikvision,
 			IPAddress:     "192.168.1.101",
 			Status:        domain.CameraStatusOnline,
 			LastHeartbeat: time.Now(),
@@ -146,6 +180,8 @@ func seedDefaultData(db *gorm.DB, cfg *config.Config) {
 			Name:          "Chiqish ANPR Kamera (Yo'lak 2)",
 			BranchID:      branch.ID,
 			Direction:     domain.DirectionExit,
+			Code:          "cam-exit",
+			Source:        domain.CameraSourceHikvision,
 			IPAddress:     "192.168.1.102",
 			Status:        domain.CameraStatusOnline,
 			LastHeartbeat: time.Now(),
@@ -167,7 +203,8 @@ func seedDefaultData(db *gorm.DB, cfg *config.Config) {
 			BranchID:     branch.ID,
 			Direction:    domain.DirectionEntry,
 			Status:       domain.BarrierClosed,
-			RelayURL:     "http://192.168.1.201/relay/open",
+			ControlType:  domain.BarrierControlNone,
+			RelayURL:     "",
 			AutoCloseSec: 10,
 			CreatedAt:    time.Now(),
 			UpdatedAt:    time.Now(),
@@ -178,7 +215,8 @@ func seedDefaultData(db *gorm.DB, cfg *config.Config) {
 			BranchID:     branch.ID,
 			Direction:    domain.DirectionExit,
 			Status:       domain.BarrierClosed,
-			RelayURL:     "http://192.168.1.202/relay/open",
+			ControlType:  domain.BarrierControlNone,
+			RelayURL:     "",
 			AutoCloseSec: 10,
 			CreatedAt:    time.Now(),
 			UpdatedAt:    time.Now(),

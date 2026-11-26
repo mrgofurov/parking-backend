@@ -16,6 +16,7 @@ const (
 	WSEventBarrierChange   WSEventType = "BARRIER_STATUS"
 	WSEventPayment         WSEventType = "PAYMENT_SUCCESS"
 	WSEventOccupancyUpdate WSEventType = "OCCUPANCY_UPDATE"
+	WSEventExitUnknown     WSEventType = "VEHICLE_EXIT_UNKNOWN"
 )
 
 type WSMessage struct {
@@ -66,7 +67,7 @@ func (h *WebSocketHub) run() {
 				continue
 			}
 
-			h.mu.RLock()
+			h.mu.Lock()
 			for client := range h.clients {
 				err := client.WriteMessage(websocket.TextMessage, data)
 				if err != nil {
@@ -75,7 +76,7 @@ func (h *WebSocketHub) run() {
 					delete(h.clients, client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }

@@ -23,6 +23,7 @@ type Handlers struct {
 	Barrier *handler.BarrierHandler
 	Camera  *handler.CameraHandler
 	Report  *handler.ReportHandler
+	Display *handler.DisplayHandler
 	WS      *handler.WSHandler
 }
 
@@ -50,7 +51,7 @@ func SetupRoutes(
 	// Handlers Init
 	h := &Handlers{
 		Auth:    handler.NewAuthHandler(repos.User, cfg),
-		ANPR:    handler.NewANPRHandler(services.ANPR),
+		ANPR:    handler.NewANPRHandler(cfg, services.ANPR, repos.Camera),
 		Session: handler.NewSessionHandler(services.Session),
 		Client:  handler.NewClientHandler(repos.Client),
 		Tariff:  handler.NewTariffHandler(services.Tariff),
@@ -58,6 +59,7 @@ func SetupRoutes(
 		Barrier: handler.NewBarrierHandler(services.Barrier),
 		Camera:  handler.NewCameraHandler(repos.Camera, repos.Branch),
 		Report:  handler.NewReportHandler(services.Report, repos.Branch),
+		Display: handler.NewDisplayHandler(services.ANPR, services.Display, services.QRPayment, repos.Camera, repos.Branch),
 		WS:      handler.NewWSHandler(services.Hub),
 	}
 
@@ -71,11 +73,17 @@ func SetupRoutes(
 
 	api := app.Group("/api/v1")
 
-	// Public Auth & Webhook
+	// Public Auth & device webhooks (protected by ANPR_WEBHOOK_TOKEN when set)
 	api.Post("/auth/login", h.Auth.Login)
 	api.Post("/anpr/event", h.ANPR.HandleEvent)
-	api.Post("/anpr/simulate", h.ANPR.SimulateEvent)
+	api.Post("/anpr/hikvision", h.ANPR.HikvisionEvent)
+	api.Post("/anpr/hikvision/:camera", h.ANPR.HikvisionEvent)
 	api.Get("/anpr/heartbeat", h.ANPR.Heartbeat)
+	api.Get("/anpr/capture-cameras", h.ANPR.ListCaptureCameras)
+
+	// Customer-facing lane display (gate monitor has no login)
+	api.Get("/display", h.Display.ListLanes)
+	api.Get("/display/:camera", h.Display.GetLaneState)
 
 	// Protected Endpoints
 	authMW := middleware.AuthMiddleware(cfg.JWTSecret)
@@ -83,6 +91,15 @@ func SetupRoutes(
 
 	// Auth me
 	protected.Get("/auth/me", h.Auth.GetMe)
+
+	// Virtual gate simulator (was public — anyone could open barriers)
+	protected.Post("/anpr/simulate", h.ANPR.SimulateEvent)
+
+	// QR (Munis / UzQR) payment requests
+	protected.Get("/payment-requests", h.Display.ListPaymentRequests)
+	protected.Post("/payment-requests/:id/check", h.Display.CheckPaymentRequest)
+	protected.Post("/payment-requests/:id/mock-pay", h.Display.MockPayPaymentRequest)
+	protected.Post("/payment-requests/:id/cancel", h.Display.CancelPaymentRequest)
 
 	// Users (Admin only)
 	adminMW := middleware.RequireRole(domain.RoleAdmin)
@@ -151,11 +168,13 @@ func SetupRoutes(
 }
 
 type Services struct {
-	Hub     *service.WebSocketHub
-	Barrier service.BarrierService
-	Tariff  service.TariffService
-	ANPR    service.ANPRService
-	Session service.SessionService
-	Payment service.PaymentService
-	Report  service.ReportService
+	Hub       *service.WebSocketHub
+	Barrier   service.BarrierService
+	Tariff    service.TariffService
+	ANPR      service.ANPRService
+	Session   service.SessionService
+	Payment   service.PaymentService
+	Report    service.ReportService
+	Display   *service.DisplayService
+	QRPayment service.QRPaymentService
 }
