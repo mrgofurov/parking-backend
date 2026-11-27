@@ -62,6 +62,18 @@ curl http://localhost:8090/health            # "connected": true bo'lishi kerak
 
 Mini-PC BIOS'ida "Restore on AC power loss = Power On" sozlamasini yoqing va kompyuterni UPS'ga ulang.
 
+### Windows kompyuter
+
+Paketni yig'ish (backend repozitoriysining ildizida):
+
+```bash
+OUT=dist/parking-agent-windows-amd64 && mkdir -p $OUT
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=0.1.0" -o $OUT/parking-agent.exe ./cmd/device-agent
+cp deploy/device-agent/windows/* $OUT/ && (cd dist && zip -qr parking-agent-windows-amd64.zip parking-agent-windows-amd64)
+```
+
+Zip faylni Windows kompyuterda oching, `agent.env.example` faylini `agent.env` qilib to'ldiring va `install.cmd` ni **Run as administrator** bilan ishga tushiring. O'rnatuvchi agentni `C:\Program Files\ParkingAgent` ga qo'yadi, firewall'da 8090-portni ochadi va Task Scheduler'da `ParkingAgent` vazifasini yaratadi. Bu vazifa kompyuter yonganda agentni SYSTEM nomidan ishga tushiradi va to'xtab qolsa qayta ko'taradi. Log fayli: `C:\ProgramData\parking-agent\agent.log`. Batafsil: `windows/README.txt`.
+
 ## 3. Shlagbaumni agentga bog'lash
 
 Admin panelda shlagbaumni tahrirlang va **"Buyruqni kim yuboradi?"** maydonida parkovkadagi agentni tanlang. Shlagbaumning boshqa sozlamalari (turi, IP, login, rele raqami) o'zgarmaydi, ular parkovka tarmog'iga tegishli manzillar bo'ladi.

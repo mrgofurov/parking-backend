@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +39,20 @@ type Config struct {
 	QueueMaxItems int
 }
 
+// DataDir is where the agent keeps its queue (and, on Windows, its log).
+func DataDir() string {
+	if runtime.GOOS == "windows" {
+		base := os.Getenv("ProgramData")
+		if base == "" {
+			base = `C:\ProgramData`
+		}
+		return filepath.Join(base, "parking-agent")
+	}
+	return "/var/lib/parking-agent"
+}
+
+func defaultQueueDir() string { return filepath.Join(DataDir(), "queue") }
+
 func getenv(key, def string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
@@ -51,7 +67,7 @@ func ConfigFromEnv() (Config, error) {
 		Token:         getenv("AGENT_TOKEN", ""),
 		Listen:        getenv("AGENT_LISTEN", ":8090"),
 		ANPRToken:     getenv("AGENT_ANPR_TOKEN", ""),
-		QueueDir:      getenv("AGENT_QUEUE_DIR", "/var/lib/parking-agent/queue"),
+		QueueDir:      getenv("AGENT_QUEUE_DIR", defaultQueueDir()),
 		QueueMaxAge:   30 * time.Minute,
 		QueueMaxItems: 5000,
 	}
