@@ -20,6 +20,10 @@ type Config struct {
 	// must send it as ?token=… or X-ANPR-Token header.
 	ANPRWebhookToken string
 
+	// Windows device-agent executable the admin panel's "Windows o'rnatuvchi"
+	// download is built from (the Docker image builds it here).
+	AgentWindowsExe string
+
 	// Exit flow
 	ExitGraceMinutes    int // a session paid this recently opens the exit barrier without new charge
 	PaymentQRTTLMinutes int // how long a generated QR stays payable
@@ -72,6 +76,7 @@ func LoadConfig() *Config {
 		DefaultBranch: defaultBranch,
 
 		ANPRWebhookToken: getEnv("ANPR_WEBHOOK_TOKEN", ""),
+		AgentWindowsExe:  getEnv("AGENT_WINDOWS_EXE", "dist/agent/parking-agent.exe"),
 
 		ExitGraceMinutes:    getEnvAsInt("EXIT_GRACE_MINUTES", 15),
 		PaymentQRTTLMinutes: getEnvAsInt("PAYMENT_QR_TTL_MINUTES", 15),

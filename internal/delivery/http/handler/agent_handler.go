@@ -1,13 +1,18 @@
 package handler
 
 import (
+	"fmt"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
+	"github.com/smart-parking/parking-backend/internal/config"
 	"github.com/smart-parking/parking-backend/internal/domain"
+	"github.com/smart-parking/parking-backend/internal/pkg/agentsetup"
 	"github.com/smart-parking/parking-backend/internal/pkg/response"
 	"github.com/smart-parking/parking-backend/internal/repository"
 	"github.com/smart-parking/parking-backend/internal/service"
@@ -17,10 +22,14 @@ import (
 type AgentHandler struct {
 	repo repository.AgentRepository
 	hub  *service.AgentHub
+	cfg  *config.Config
 }
 
-func NewAgentHandler(repo repository.AgentRepository, hub *service.AgentHub) *AgentHandler {
-	return &AgentHandler{repo: repo, hub: hub}
+func NewAgentHandler(repo repository.AgentRepository, hub *service.AgentHub, cfg *config.Config) *AgentHandler {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	return &AgentHandler{repo: repo, hub: hub, cfg: cfg}
 }
 
 type agentRequest struct {
@@ -75,7 +84,7 @@ func (h *AgentHandler) CreateAgent(c *fiber.Ctx) error {
 
 func (h *AgentHandler) UpdateAgent(c *fiber.Ctx) error {
 	agent, err := h.find(c)
-	if err != nil {
+	if agent == nil { // the error response is already written
 		return err
 	}
 	var req agentRequest
@@ -100,26 +109,106 @@ func (h *AgentHandler) UpdateAgent(c *fiber.Ctx) error {
 // so a leaked token stops working at once.
 func (h *AgentHandler) RotateToken(c *fiber.Ctx) error {
 	agent, err := h.find(c)
-	if err != nil {
+	if agent == nil { // the error response is already written
 		return err
 	}
-	token, err := service.NewAgentToken()
-	if err != nil {
-		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+	token, err := h.rotate(c, agent)
+	if token == "" {
+		return err
 	}
-	agent.TokenHash = service.HashAgentToken(token)
-	agent.UpdatedAt = time.Now()
-	if err := h.repo.Update(agent); err != nil {
-		return response.Error(c, fiber.StatusInternalServerError, err.Error())
-	}
-	h.hub.Disconnect(agent.ID)
 	return response.Success(c, agentWithToken{Agent: agent, Token: token},
 		"Yangi token yaratildi. Uni agent sozlamasiga yozing")
 }
 
+// rotate returns "" after writing the error response.
+func (h *AgentHandler) rotate(c *fiber.Ctx, agent *domain.Agent) (string, error) {
+	token, err := service.NewAgentToken()
+	if err != nil {
+		return "", response.Error(c, fiber.StatusInternalServerError, err.Error())
+	}
+	agent.TokenHash = service.HashAgentToken(token)
+	agent.UpdatedAt = time.Now()
+	if err := h.repo.Update(agent); err != nil {
+		return "", response.Error(c, fiber.StatusInternalServerError, err.Error())
+	}
+	h.hub.Disconnect(agent.ID)
+	return token, nil
+}
+
+type installerRequest struct {
+	// ServerURL is the backend address the agent connects to, as the admin
+	// panel knows it (its public API URL). Empty = derived from the request.
+	ServerURL string `json:"server_url"`
+}
+
+// WindowsInstaller returns parking-agent-setup.exe with this agent's settings
+// inside (backend URL, a new token, the ANPR token): on the parking PC it is
+// downloaded and double-clicked, nothing to type. Only token hashes are
+// stored, so a new token is issued and the agent's old one stops working.
+func (h *AgentHandler) WindowsInstaller(c *fiber.Ctx) error {
+	agent, err := h.find(c)
+	if agent == nil { // the error response is already written
+		return err
+	}
+	var req installerRequest
+	_ = c.BodyParser(&req)
+	serverURL, err := installerServerURL(req.ServerURL, c)
+	if err != nil {
+		return response.Error(c, fiber.StatusBadRequest, err.Error())
+	}
+	exe, err := os.ReadFile(h.cfg.AgentWindowsExe)
+	if err != nil {
+		return response.Error(c, fiber.StatusServiceUnavailable,
+			"Windows agent fayli serverda yo'q ("+h.cfg.AgentWindowsExe+"). Backend Docker image'ini qayta yig'ing yoki AGENT_WINDOWS_EXE ni ko'rsating")
+	}
+	token, err := h.rotate(c, agent)
+	if token == "" {
+		return err
+	}
+	out, err := agentsetup.Append(exe, WindowsAgentEnv(serverURL, token, h.cfg.ANPRWebhookToken, agent.Name))
+	if err != nil {
+		return response.Error(c, fiber.StatusInternalServerError, err.Error())
+	}
+	c.Set(fiber.HeaderContentType, "application/vnd.microsoft.portable-executable")
+	c.Set(fiber.HeaderContentDisposition, `attachment; filename="parking-agent-setup.exe"`)
+	c.Set(fiber.HeaderCacheControl, "no-store")
+	return c.Send(out)
+}
+
+func installerServerURL(raw string, c *fiber.Ctx) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		proto := c.Get("X-Forwarded-Proto")
+		if proto == "" {
+			proto = c.Protocol()
+		}
+		raw = proto + "://" + c.Hostname()
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("backend manzili noto'g'ri: %q (http:// yoki https:// bilan)", raw)
+	}
+	return raw, nil
+}
+
+// WindowsAgentEnv is the agent.env text embedded in the setup .exe.
+func WindowsAgentEnv(serverURL, token, anprToken, name string) string {
+	clean := strings.NewReplacer("\r", " ", "\n", " ").Replace(name)
+	return fmt.Sprintf(`# Smart Parking device-agent: %s
+# Built by the admin panel's "Windows o'rnatuvchi" (%s).
+AGENT_SERVER_URL=%s
+AGENT_TOKEN=%s
+AGENT_LISTEN=:8090
+AGENT_ANPR_TOKEN=%s
+AGENT_QUEUE_DIR=C:\ProgramData\parking-agent\queue
+AGENT_QUEUE_MAX_AGE=30m
+AGENT_LOG_FILE=C:\ProgramData\parking-agent\agent.log
+`, clean, time.Now().Format("2006-01-02 15:04"), serverURL, token, anprToken)
+}
+
 func (h *AgentHandler) DeleteAgent(c *fiber.Ctx) error {
 	agent, err := h.find(c)
-	if err != nil {
+	if agent == nil { // the error response is already written
 		return err
 	}
 	if err := h.repo.Delete(agent.ID); err != nil {
@@ -129,6 +218,8 @@ func (h *AgentHandler) DeleteAgent(c *fiber.Ctx) error {
 	return response.Success(c, nil, "Agent o'chirildi")
 }
 
+// find returns nil after writing the error response (whose error, from
+// c.JSON, is usually nil: callers check the agent, not the error).
 func (h *AgentHandler) find(c *fiber.Ctx) (*domain.Agent, error) {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {

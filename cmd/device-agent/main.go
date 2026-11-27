@@ -5,7 +5,12 @@
 //	device-agent -config /etc/parking-agent/agent.env
 //
 // Without -config it reads agent.env next to the executable, if present (the
-// usual layout on Windows: parking-agent.exe + agent.env in one folder).
+// usual layout on Windows: parking-agent.exe + agent.env in one folder), else
+// the settings embedded in the executable itself (parking-agent-setup.exe
+// downloaded from the admin panel, see internal/pkg/agentsetup).
+//
+// On Windows, double-clicking a setup .exe (no arguments, settings embedded)
+// installs the agent: see install_windows.go.
 package main
 
 import (
@@ -24,6 +29,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/smart-parking/parking-backend/internal/agent"
+	"github.com/smart-parking/parking-backend/internal/pkg/agentsetup"
 )
 
 // version is set at build time: -ldflags "-X main.version=1.0.0"
@@ -41,17 +47,32 @@ func main() {
 		return
 	}
 
-	if *configPath == "" {
-		if exe, err := os.Executable(); err == nil {
-			if p := filepath.Join(filepath.Dir(exe), "agent.env"); fileExists(p) {
-				*configPath = p
-			}
+	exe, _ := os.Executable()
+	embedded := ""
+	if exe != "" {
+		embedded, _ = agentsetup.Read(exe)
+	}
+	explicitInstall := flag.NArg() == 1 && flag.Arg(0) == "install"
+	doubleClicked := flag.NArg() == 0 && *configPath == "" && embedded != ""
+	if explicitInstall || (doubleClicked && shouldSelfInstall(exe)) {
+		os.Exit(selfInstall(exe, embedded))
+	}
+
+	if *configPath == "" && exe != "" {
+		if p := filepath.Join(filepath.Dir(exe), "agent.env"); fileExists(p) {
+			*configPath = p
 		}
 	}
-	if *configPath != "" {
+	switch {
+	case *configPath != "":
 		if err := godotenv.Load(*configPath); err != nil {
 			log.Fatalf("[agent] %s o'qilmadi: %v", *configPath, err)
 		}
+	case embedded != "":
+		if err := loadEnvText(embedded); err != nil {
+			log.Fatalf("[agent] .exe ichidagi sozlama o'qilmadi: %v", err)
+		}
+		*configPath = "(.exe ichida)"
 	}
 	setupLogFile(os.Getenv("AGENT_LOG_FILE"))
 
@@ -90,6 +111,21 @@ func main() {
 	}
 	<-ctx.Done()
 	log.Println("[agent] to'xtatildi")
+}
+
+// loadEnvText sets AGENT_* variables from agent.env text; variables already
+// set in the environment win, as with godotenv.Load.
+func loadEnvText(text string) error {
+	vals, err := godotenv.Unmarshal(text)
+	if err != nil {
+		return err
+	}
+	for k, v := range vals {
+		if _, set := os.LookupEnv(k); !set {
+			_ = os.Setenv(k, v)
+		}
+	}
+	return nil
 }
 
 func fileExists(p string) bool {

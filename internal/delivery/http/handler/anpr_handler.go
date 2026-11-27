@@ -187,7 +187,9 @@ func (h *ANPRHandler) Heartbeat(c *fiber.Ctx) error {
 }
 
 // ListCaptureCameras returns cameras that parking-capture-service must read
-// (source CAPTURE_SERVICE) with their RTSP URLs.
+// (source CAPTURE_SERVICE) with their RTSP URLs. The URLs carry the camera
+// login, so set ANPR_WEBHOOK_TOKEN wherever this endpoint is reachable from
+// outside the parking network.
 func (h *ANPRHandler) ListCaptureCameras(c *fiber.Ctx) error {
 	if !h.tokenOK(c) {
 		return response.Error(c, fiber.StatusUnauthorized, "ANPR token noto'g'ri")
@@ -207,7 +209,7 @@ func (h *ANPRHandler) ListCaptureCameras(c *fiber.Ctx) error {
 	out := []capCam{}
 	for _, cam := range cams {
 		if cam.Source == domain.CameraSourceCapture {
-			out = append(out, capCam{cam.ID, cam.Code, cam.Name, cam.Direction, cam.RTSPUrl, cam.BranchID})
+			out = append(out, capCam{cam.ID, cam.Code, cam.Name, cam.Direction, cam.EffectiveRTSPURL(), cam.BranchID})
 		}
 	}
 	return response.Success(c, out)

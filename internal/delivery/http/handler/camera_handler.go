@@ -46,10 +46,21 @@ type CameraDTO struct {
 	BarrierID     *uuid.UUID           `json:"barrier_id"`
 	IPAddress     string               `json:"ip_address"`
 	RTSPUrl       string               `json:"rtsp_url"`
+	RTSPPort      int                  `json:"rtsp_port"`
+	StreamChannel int                  `json:"stream_channel"`
+	Username      string               `json:"username"`
+	Password      string               `json:"password"` // empty on update = keep
 	MinConfidence float64              `json:"min_confidence"`
 	DisplayIP     string               `json:"display_ip"`
 	DisplayRows   int                  `json:"display_rows"`
 	BranchID      *uuid.UUID           `json:"branch_id"`
+}
+
+func defaultInt(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
 }
 
 func normalizeSource(s domain.CameraSource) domain.CameraSource {
@@ -108,7 +119,12 @@ func (h *CameraHandler) CreateCamera(c *fiber.Ctx) error {
 		Source:        normalizeSource(dto.Source),
 		BarrierID:     dto.BarrierID,
 		IPAddress:     dto.IPAddress,
-		RTSPUrl:       dto.RTSPUrl,
+		RTSPUrl:       strings.TrimSpace(dto.RTSPUrl),
+		RTSPPort:      defaultInt(dto.RTSPPort, 554),
+		StreamChannel: defaultInt(dto.StreamChannel, 102),
+		Username:      strings.TrimSpace(dto.Username),
+		Password:      dto.Password,
+		HasPassword:   dto.Password != "",
 		MinConfidence: dto.MinConfidence,
 		DisplayIP:     strings.TrimSpace(dto.DisplayIP),
 		DisplayRows:   service.NormalizeLEDRows(dto.DisplayRows),
@@ -172,7 +188,14 @@ func (h *CameraHandler) UpdateCamera(c *fiber.Ctx) error {
 		cam.BarrierID = nil
 	}
 	cam.IPAddress = dto.IPAddress
-	cam.RTSPUrl = dto.RTSPUrl
+	cam.RTSPUrl = strings.TrimSpace(dto.RTSPUrl)
+	cam.RTSPPort = defaultInt(dto.RTSPPort, defaultInt(cam.RTSPPort, 554))
+	cam.StreamChannel = defaultInt(dto.StreamChannel, defaultInt(cam.StreamChannel, 102))
+	cam.Username = strings.TrimSpace(dto.Username)
+	if dto.Password != "" {
+		cam.Password = dto.Password
+	}
+	cam.HasPassword = cam.Password != ""
 	cam.MinConfidence = dto.MinConfidence
 	cam.DisplayIP = strings.TrimSpace(dto.DisplayIP)
 	cam.DisplayRows = service.NormalizeLEDRows(dto.DisplayRows)

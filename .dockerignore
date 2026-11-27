@@ -7,3 +7,7 @@ uploads
 parking.db
 firmware
 deploy
+# install scripts embedded in the Windows device-agent (go:embed)
+!deploy/device-agent/windows
+# local builds; the image builds its own agent
+dist

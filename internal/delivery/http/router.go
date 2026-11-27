@@ -64,7 +64,7 @@ func SetupRoutes(
 		Display: handler.NewDisplayHandler(services.ANPR, services.Display, services.QRPayment, repos.Camera, repos.Branch),
 		Pay: handler.NewPayHandler(cfg, services.ANPR, services.Display, services.Click,
 			repos.PaymentRequest, repos.Branch),
-		Agent: handler.NewAgentHandler(repos.Agent, services.Agents),
+		Agent: handler.NewAgentHandler(repos.Agent, services.Agents, cfg),
 		WS:    handler.NewWSHandler(services.Hub),
 	}
 
@@ -164,6 +164,7 @@ func SetupRoutes(
 	protected.Post("/agents", adminMW, h.Agent.CreateAgent)
 	protected.Put("/agents/:id", adminMW, h.Agent.UpdateAgent)
 	protected.Post("/agents/:id/rotate-token", adminMW, h.Agent.RotateToken)
+	protected.Post("/agents/:id/windows-installer", adminMW, h.Agent.WindowsInstaller)
 	protected.Delete("/agents/:id", adminMW, h.Agent.DeleteAgent)
 
 	// Cameras

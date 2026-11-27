@@ -26,6 +26,7 @@ type CreateBarrierRequest struct {
 	DeviceUsername string                    `json:"device_username"`
 	DevicePassword string                    `json:"device_password"`
 	OutputID       int                       `json:"output_id"`
+	DevicePort     int                       `json:"device_port"`
 	CloseOutputID  int                       `json:"close_output_id"`
 	CloseURL       string                    `json:"close_url"`
 	AutoCloseSec   int                       `json:"auto_close_sec"`
@@ -81,13 +82,23 @@ func NewBarrierService(repo repository.BarrierRepository, hub *WebSocketHub, age
 	}
 }
 
+// deviceAddress joins the device IP and its HTTP port ("ip" when the port is
+// the default 80 or the host already names a port).
+func deviceAddress(host string, port int) string {
+	host = strings.TrimSpace(host)
+	if host == "" || port <= 0 || port == 80 || strings.Contains(strings.TrimPrefix(strings.TrimPrefix(host, "http://"), "https://"), ":") {
+		return host
+	}
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
 func specFromBarrier(b *domain.Barrier) barrierctl.Spec {
 	return barrierctl.Spec{
 		Name:          b.Name,
 		Type:          string(b.ControlType),
 		RelayURL:      b.RelayURL,
 		CloseURL:      b.CloseURL,
-		Host:          b.DeviceHost,
+		Host:          deviceAddress(b.DeviceHost, b.DevicePort),
 		Username:      b.DeviceUsername,
 		Password:      b.DevicePassword,
 		OutputID:      b.OutputID,
@@ -338,6 +349,7 @@ func (s *barrierService) CreateBarrier(req CreateBarrierRequest) (*domain.Barrie
 		DeviceHost:     req.DeviceHost,
 		DeviceUsername: req.DeviceUsername,
 		DevicePassword: req.DevicePassword,
+		DevicePort:     defaultPort(req.DevicePort),
 		OutputID:       req.OutputID,
 		CloseOutputID:  req.CloseOutputID,
 		CloseURL:       req.CloseURL,
@@ -392,6 +404,9 @@ func (s *barrierService) UpdateBarrier(id uuid.UUID, req UpdateBarrierRequest) (
 	}
 	if req.OutputID > 0 {
 		barrier.OutputID = req.OutputID
+	}
+	if req.DevicePort > 0 {
+		barrier.DevicePort = req.DevicePort
 	}
 	if req.CloseOutputID >= 0 {
 		barrier.CloseOutputID = req.CloseOutputID
@@ -469,6 +484,13 @@ func (s *barrierService) PingBarrier(id uuid.UUID) (map[string]interface{}, erro
 	m["via_agent"] = true
 	m["message"] = "Agent orqali: " + res.Ping.Message
 	return m, nil
+}
+
+func defaultPort(p int) int {
+	if p <= 0 {
+		return 80
+	}
+	return p
 }
 
 // parseAgentID: nil = not given, "" = unbind.

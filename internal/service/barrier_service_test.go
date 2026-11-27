@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -207,5 +209,43 @@ func TestAutoCloseWithoutCloseChannelOnlyUpdatesStatus(t *testing.T) {
 	waitForStatus(t, repo, id, domain.BarrierClosed)
 	if dev.count() != 1 {
 		t.Fatalf("expected only the open request, got %d hits", dev.count())
+	}
+}
+
+func TestDeviceAddress(t *testing.T) {
+	for _, c := range []struct {
+		host string
+		port int
+		want string
+	}{
+		{"192.168.1.64", 0, "192.168.1.64"},
+		{"192.168.1.64", 80, "192.168.1.64"},
+		{"192.168.1.64", 8000, "192.168.1.64:8000"},
+		{"192.168.1.64:81", 8000, "192.168.1.64:81"}, // host already names a port
+		{"http://cam.local", 8080, "http://cam.local:8080"},
+		{"", 8000, ""},
+	} {
+		if got := deviceAddress(c.host, c.port); got != c.want {
+			t.Errorf("deviceAddress(%q, %d) = %q, want %q", c.host, c.port, got, c.want)
+		}
+	}
+}
+
+// The barrier's DevicePort is used when the IP is entered without a port.
+func TestBarrierUsesDevicePort(t *testing.T) {
+	dev := &fakeISAPI{}
+	srv := httptest.NewServer(http.HandlerFunc(dev.handler))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	port, _ := strconv.Atoi(u.Port())
+
+	svc, repo := newBarrierTestSvc(t)
+	id := addBarrier(t, repo, domain.Barrier{ControlType: domain.BarrierControlHikvisionIO,
+		DeviceHost: u.Hostname(), DevicePort: port, OutputID: 1})
+	if err := svc.OpenBarrier(id, "test"); err != nil {
+		t.Fatalf("open with DevicePort: %v", err)
+	}
+	if !strings.HasPrefix(dev.last(), "PUT /ISAPI/System/IO/outputs/1/trigger") {
+		t.Fatalf("last=%q", dev.last())
 	}
 }

@@ -64,7 +64,7 @@ func startBackend(t *testing.T) *backend {
 	hub := service.NewAgentHub(agents)
 
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	h := handler.NewAgentHandler(agents, hub)
+	h := handler.NewAgentHandler(agents, hub, nil)
 	app.Get(agentproto.Path, h.Upgrade(), h.HandleWS())
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

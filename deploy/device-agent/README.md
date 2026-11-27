@@ -64,12 +64,18 @@ Mini-PC BIOS'ida "Restore on AC power loss = Power On" sozlamasini yoqing va kom
 
 ### Windows kompyuter
 
-Paketni yig'ish (backend repozitoriysining ildizida):
+**Eng oson yo'l (bitta fayl):** parkovkadagi kompyuterda admin panelni oching → Kamera & Shlagbaum → Device-agentlar → agent kartochkasidagi **"Windows o'rnatuvchi"** (yangi agentda: yaratilgandan keyin chiqqan oynadagi tugma). Yuklangan `parking-agent-setup.exe` ni ikki marta bosib, "Ha" deyiladi, va tamom. Faylning ichida backend manzili, agentning yangi tokeni va `ANPR_WEBHOOK_TOKEN` bor (`internal/pkg/agentsetup`), shuning uchun `agent.env` yozish kerak emas. Backend bu faylni o'z Docker image'ida yig'ilgan `dist/agent/parking-agent.exe` dan tayyorlaydi (`AGENT_WINDOWS_EXE`). Lokal backend uchun shu faylni yig'ib qo'ying:
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o dist/agent/parking-agent.exe ./cmd/device-agent
+```
+
+**Qo'lda o'rnatish (zip).** Paketni yig'ish (backend repozitoriysining ildizida):
 
 ```bash
 OUT=dist/parking-agent-windows-amd64 && mkdir -p $OUT
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=0.1.0" -o $OUT/parking-agent.exe ./cmd/device-agent
-cp deploy/device-agent/windows/* $OUT/ && (cd dist && zip -qr parking-agent-windows-amd64.zip parking-agent-windows-amd64)
+cp deploy/device-agent/windows/*.{ps1,cmd,txt,example} $OUT/ && (cd dist && zip -qr parking-agent-windows-amd64.zip parking-agent-windows-amd64)
 ```
 
 Zip faylni Windows kompyuterda oching, `agent.env.example` faylini `agent.env` qilib to'ldiring va `install.cmd` ni **Run as administrator** bilan ishga tushiring. O'rnatuvchi agentni `C:\Program Files\ParkingAgent` ga qo'yadi, firewall'da 8090-portni ochadi va Task Scheduler'da `ParkingAgent` vazifasini yaratadi. Bu vazifa kompyuter yonganda agentni SYSTEM nomidan ishga tushiradi va to'xtab qolsa qayta ko'taradi. Log fayli: `C:\ProgramData\parking-agent\agent.log`. Batafsil: `windows/README.txt`.

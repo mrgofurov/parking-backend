@@ -1,6 +1,9 @@
 package domain
 
 import (
+	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,10 +76,20 @@ type Camera struct {
 	Source CameraSource `gorm:"default:'HIKVISION_ANPR'" json:"source"`
 	// BarrierID binds the camera to the barrier of its lane. When empty, the
 	// branch's first barrier with the same direction is used.
-	BarrierID     *uuid.UUID `json:"barrier_id,omitempty"`
-	IPAddress     string     `json:"ip_address"`
-	RTSPUrl       string     `json:"rtsp_url"`
-	MinConfidence float64    `gorm:"default:0" json:"min_confidence"` // 0-100, events below are ignored
+	BarrierID *uuid.UUID `json:"barrier_id,omitempty"`
+	IPAddress string     `json:"ip_address"`
+	// RTSPUrl overrides the stream address. Empty: it is built from
+	// IPAddress, RTSPPort, Username, Password and StreamChannel
+	// (see EffectiveRTSPURL), so the admin only enters the parts.
+	RTSPUrl  string `json:"rtsp_url"`
+	RTSPPort int    `gorm:"default:554" json:"rtsp_port"`
+	// StreamChannel: Hikvision stream, 101 = main, 102 = sub-stream (set it
+	// to ~1280x720 on the camera: enough for plates, far lighter to decode).
+	StreamChannel int     `gorm:"default:102" json:"stream_channel"`
+	Username      string  `json:"username"`
+	Password      string  `json:"-"`
+	HasPassword   bool    `gorm:"-" json:"has_password"`
+	MinConfidence float64 `gorm:"default:0" json:"min_confidence"` // 0-100, events below are ignored
 	// DisplayIP is the lane's Hikvision DS-TVL224 LED screen ("ip" or
 	// "ip:port"); empty = no LED screen on this lane.
 	DisplayIP string `json:"display_ip"`
@@ -86,6 +99,36 @@ type Camera struct {
 	LastHeartbeat time.Time    `json:"last_heartbeat"`
 	CreatedAt     time.Time    `json:"created_at"`
 	UpdatedAt     time.Time    `json:"updated_at"`
+}
+
+func (c *Camera) AfterFind(_ *gorm.DB) error {
+	c.HasPassword = c.Password != ""
+	return nil
+}
+
+// EffectiveRTSPURL is the stream capture-service should read: RTSPUrl when
+// set, otherwise rtsp://user:pass@ip:port/Streaming/Channels/<channel>.
+func (c *Camera) EffectiveRTSPURL() string {
+	if u := strings.TrimSpace(c.RTSPUrl); u != "" {
+		return u
+	}
+	host := strings.TrimSpace(c.IPAddress)
+	if host == "" {
+		return ""
+	}
+	port := c.RTSPPort
+	if port <= 0 {
+		port = 554
+	}
+	channel := c.StreamChannel
+	if channel <= 0 {
+		channel = 102
+	}
+	auth := ""
+	if c.Username != "" {
+		auth = url.UserPassword(c.Username, c.Password).String() + "@"
+	}
+	return fmt.Sprintf("rtsp://%s%s:%d/Streaming/Channels/%d", auth, host, port, channel)
 }
 
 type BarrierStatus string
@@ -109,7 +152,9 @@ type Barrier struct {
 	DeviceUsername    string `json:"device_username"`
 	DevicePassword    string `json:"-"`
 	HasDevicePassword bool   `gorm:"-" json:"has_device_password"`
-	OutputID          int    `gorm:"default:1" json:"output_id"` // relay output no. / gate channel
+	// DevicePort: the device's HTTP (ISAPI) port; 0/80 = default.
+	DevicePort int `gorm:"default:80" json:"device_port"`
+	OutputID   int `gorm:"default:1" json:"output_id"` // relay output no. / gate channel
 	// Closing on command (optional). HIKVISION_GATE closes via ctrlMode=close;
 	// HIKVISION_IO needs a second relay output wired to the controller's CLOSE
 	// input; HTTP_RELAY needs a close URL. 0 / empty = the barrier closes by
