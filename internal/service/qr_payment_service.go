@@ -24,6 +24,9 @@ const (
 
 	ProviderMunis = "MUNIS"
 	ProviderMock  = "MOCK"
+	// ProviderClick: Munis is off, the request exists only so the driver can
+	// pay it through Click (bill_number = Click transaction_param).
+	ProviderClick = "CLICK"
 )
 
 var ErrQRDisabled = errors.New("QR to'lov (Munis) sozlanmagan")
@@ -38,6 +41,9 @@ type QRPaymentService interface {
 	RequestForSession(session *domain.ParkingSession, cameraID *uuid.UUID) (*domain.PaymentRequest, error)
 	Check(id uuid.UUID) (*domain.PaymentRequest, error)
 	MockPay(id uuid.UUID) (*domain.PaymentRequest, error)
+	// CompleteExternal settles a request paid through another channel
+	// (Click). An EXPIRED request is still accepted: the money is real.
+	CompleteExternal(id uuid.UUID, paid float64, ref, operatorName string) (*domain.PaymentRequest, error)
 	Cancel(id uuid.UUID) (*domain.PaymentRequest, error)
 	List(status string, limit int) ([]domain.PaymentRequest, error)
 	Run(ctx context.Context)
@@ -49,6 +55,7 @@ type qrPaymentService struct {
 	display    *DisplayService
 	client     *munis.Client
 	mode       string
+	clickOn    bool // Click can pay requests, so they are needed even with Munis off
 	ttl        time.Duration
 	poll       time.Duration
 }
@@ -90,7 +97,8 @@ func NewQRPaymentService(cfg *config.Config, repos *repository.RepositoryContain
 	if poll <= 0 {
 		poll = 3 * time.Second
 	}
-	log.Printf("[QRPay] Rejim: %s (QR amal qilish muddati %s, tekshiruv har %s)\n", mode, ttl, poll)
+	clickOn := ResolveClickMode(cfg) != ClickModeOff
+	log.Printf("[QRPay] Rejim: %s, Click: %v (summa qotirilish muddati %s, tekshiruv har %s)\n", mode, clickOn, ttl, poll)
 
 	return &qrPaymentService{
 		repos:      repos,
@@ -98,6 +106,7 @@ func NewQRPaymentService(cfg *config.Config, repos *repository.RepositoryContain
 		display:    display,
 		client:     client,
 		mode:       mode,
+		clickOn:    clickOn,
 		ttl:        ttl,
 		poll:       poll,
 	}
@@ -113,7 +122,7 @@ func newBillNumber() string {
 }
 
 func (s *qrPaymentService) RequestForSession(session *domain.ParkingSession, cameraID *uuid.UUID) (*domain.PaymentRequest, error) {
-	if s.mode == QRModeOff {
+	if s.mode == QRModeOff && !s.clickOn {
 		return nil, ErrQRDisabled
 	}
 	amount := munis.ChargedSum(session.FinalFee)
@@ -156,10 +165,13 @@ func (s *qrPaymentService) RequestForSession(session *domain.ParkingSession, cam
 		UpdatedAt:   now,
 	}
 
-	if s.mode == QRModeMock {
+	switch s.mode {
+	case QRModeOff: // Click only: no QR to show, the driver pays from the phone page
+		pr.Provider = ProviderClick
+	case QRModeMock:
 		pr.Provider = ProviderMock
 		pr.QRPayload = fmt.Sprintf("MOCK-UZQR|bill=%s|amount=%.0f|plate=%s", pr.BillNumber, amount, session.PlateNumber)
-	} else {
+	default:
 		pr.Provider = ProviderMunis
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -288,6 +300,22 @@ func (s *qrPaymentService) MockPay(id uuid.UUID) (*domain.PaymentRequest, error)
 	return s.complete(pr, pr.Amount, "MOCK:"+pr.BillNumber, "UzQR (sinov)")
 }
 
+func (s *qrPaymentService) CompleteExternal(id uuid.UUID, paid float64, ref, operatorName string) (*domain.PaymentRequest, error) {
+	pr, err := s.repos.PaymentRequest.GetByID(id)
+	if err != nil {
+		return nil, errors.New("to'lov so'rovi topilmadi")
+	}
+	if pr.Status == domain.PaymentRequestExpired {
+		if won, _ := s.repos.PaymentRequest.MarkStatus(pr.ID, domain.PaymentRequestExpired, domain.PaymentRequestPending); won {
+			pr.Status = domain.PaymentRequestPending
+		}
+	}
+	if pr.Status != domain.PaymentRequestPending {
+		return pr, fmt.Errorf("so'rov holati: %s", pr.Status)
+	}
+	return s.complete(pr, paid, ref, operatorName)
+}
+
 func (s *qrPaymentService) Cancel(id uuid.UUID) (*domain.PaymentRequest, error) {
 	pr, err := s.repos.PaymentRequest.GetByID(id)
 	if err != nil {
@@ -338,7 +366,7 @@ func (s *qrPaymentService) reissueIfDisplayed(old *domain.PaymentRequest) {
 
 // Run polls pending requests until ctx is cancelled.
 func (s *qrPaymentService) Run(ctx context.Context) {
-	if s.mode == QRModeOff {
+	if s.mode == QRModeOff && !s.clickOn {
 		return
 	}
 	ticker := time.NewTicker(s.poll)

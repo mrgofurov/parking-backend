@@ -14,11 +14,13 @@ type RepositoryContainer struct {
 	Branch         BranchRepository
 	Camera         CameraRepository
 	Barrier        BarrierRepository
+	Agent          AgentRepository
 	Client         ClientRepository
 	Tariff         TariffRepository
 	ParkingSession ParkingSessionRepository
 	Payment        PaymentRepository
 	PaymentRequest PaymentRequestRepository
+	ClickTx        ClickTransactionRepository
 	AuditLog       AuditLogRepository
 }
 
@@ -28,11 +30,13 @@ func NewRepositoryContainer(db *gorm.DB) *RepositoryContainer {
 		Branch:         NewBranchRepository(db),
 		Camera:         NewCameraRepository(db),
 		Barrier:        NewBarrierRepository(db),
+		Agent:          NewAgentRepository(db),
 		Client:         NewClientRepository(db),
 		Tariff:         NewTariffRepository(db),
 		ParkingSession: NewParkingSessionRepository(db),
 		Payment:        NewPaymentRepository(db),
 		PaymentRequest: NewPaymentRequestRepository(db),
+		ClickTx:        NewClickTransactionRepository(db),
 		AuditLog:       NewAuditLogRepository(db),
 	}
 }
@@ -282,6 +286,74 @@ func (r *barrierRepo) UpdateStatus(id uuid.UUID, status domain.BarrierStatus) er
 		updates["last_triggered_at"] = &now
 	}
 	return r.db.Model(&domain.Barrier{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// ---------------- AGENT REPO ----------------
+type AgentRepository interface {
+	List() ([]domain.Agent, error)
+	GetByID(id uuid.UUID) (*domain.Agent, error)
+	GetByTokenHash(hash string) (*domain.Agent, error)
+	Create(agent *domain.Agent) error
+	Update(agent *domain.Agent) error
+	// Delete removes the agent and unbinds its barriers (they fall back to
+	// being driven by the backend directly).
+	Delete(id uuid.UUID) error
+	// Touch records a connection: last seen time and what the agent reported.
+	Touch(id uuid.UUID, version, hostname, remoteAddr string) error
+}
+
+type agentRepo struct {
+	db *gorm.DB
+}
+
+func NewAgentRepository(db *gorm.DB) AgentRepository {
+	return &agentRepo{db: db}
+}
+
+func (r *agentRepo) List() ([]domain.Agent, error) {
+	var agents []domain.Agent
+	err := r.db.Order("name asc").Find(&agents).Error
+	return agents, err
+}
+
+func (r *agentRepo) GetByID(id uuid.UUID) (*domain.Agent, error) {
+	var a domain.Agent
+	if err := r.db.First(&a, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (r *agentRepo) GetByTokenHash(hash string) (*domain.Agent, error) {
+	var a domain.Agent
+	if err := r.db.First(&a, "token_hash = ?", hash).Error; err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (r *agentRepo) Create(agent *domain.Agent) error {
+	return r.db.Create(agent).Error
+}
+
+func (r *agentRepo) Update(agent *domain.Agent) error {
+	return r.db.Save(agent).Error
+}
+
+func (r *agentRepo) Delete(id uuid.UUID) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&domain.Barrier{}).Where("agent_id = ?", id).Update("agent_id", nil).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&domain.Agent{}, "id = ?", id).Error
+	})
+}
+
+func (r *agentRepo) Touch(id uuid.UUID, version, hostname, remoteAddr string) error {
+	now := time.Now()
+	return r.db.Model(&domain.Agent{}).Where("id = ?", id).Updates(map[string]any{
+		"last_seen_at": &now, "version": version, "hostname": hostname, "remote_addr": remoteAddr,
+	}).Error
 }
 
 // ---------------- CLIENT REPO ----------------
@@ -730,6 +802,7 @@ type PaymentRequestRepository interface {
 	ListPending() ([]domain.PaymentRequest, error)
 	List(status string, limit int) ([]domain.PaymentRequest, error)
 	GetPendingBySession(sessionID uuid.UUID) (*domain.PaymentRequest, error)
+	GetByBillNumber(bill string) (*domain.PaymentRequest, error)
 	// MarkStatus atomically moves a request from one status to another and
 	// reports whether this call won (protects against double-completion).
 	MarkStatus(id uuid.UUID, from, to domain.PaymentRequestStatus) (bool, error)
@@ -788,9 +861,58 @@ func (r *paymentRequestRepo) GetPendingBySession(sessionID uuid.UUID) (*domain.P
 	return &pr, nil
 }
 
+func (r *paymentRequestRepo) GetByBillNumber(bill string) (*domain.PaymentRequest, error) {
+	var pr domain.PaymentRequest
+	if err := r.db.First(&pr, "bill_number = ?", bill).Error; err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
+
 func (r *paymentRequestRepo) MarkStatus(id uuid.UUID, from, to domain.PaymentRequestStatus) (bool, error) {
 	res := r.db.Model(&domain.PaymentRequest{}).
 		Where("id = ? AND status = ?", id, from).
 		Updates(map[string]interface{}{"status": to, "updated_at": time.Now()})
 	return res.RowsAffected == 1, res.Error
+}
+
+// ---- Click transactions ----
+
+type ClickTransactionRepository interface {
+	Create(tx *domain.ClickTransaction) error
+	Update(tx *domain.ClickTransaction) error
+	GetByID(id int64) (*domain.ClickTransaction, error)
+	GetByClickTransID(clickTransID int64) (*domain.ClickTransaction, error)
+}
+
+type clickTxRepo struct {
+	db *gorm.DB
+}
+
+func NewClickTransactionRepository(db *gorm.DB) ClickTransactionRepository {
+	return &clickTxRepo{db: db}
+}
+
+func (r *clickTxRepo) Create(tx *domain.ClickTransaction) error {
+	return r.db.Create(tx).Error
+}
+
+func (r *clickTxRepo) Update(tx *domain.ClickTransaction) error {
+	return r.db.Save(tx).Error
+}
+
+func (r *clickTxRepo) GetByID(id int64) (*domain.ClickTransaction, error) {
+	var tx domain.ClickTransaction
+	if err := r.db.First(&tx, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &tx, nil
+}
+
+func (r *clickTxRepo) GetByClickTransID(clickTransID int64) (*domain.ClickTransaction, error) {
+	var tx domain.ClickTransaction
+	if err := r.db.First(&tx, "click_trans_id = ?", clickTransID).Error; err != nil {
+		return nil, err
+	}
+	return &tx, nil
 }

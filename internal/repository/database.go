@@ -36,11 +36,13 @@ func InitDatabase(cfg *config.Config) (*gorm.DB, error) {
 		&domain.Branch{},
 		&domain.Camera{},
 		&domain.Barrier{},
+		&domain.Agent{},
 		&domain.Client{},
 		&domain.Tariff{},
 		&domain.ParkingSession{},
 		&domain.Payment{},
 		&domain.PaymentRequest{},
+		&domain.ClickTransaction{},
 		&domain.AuditLog{},
 	)
 	if err != nil {

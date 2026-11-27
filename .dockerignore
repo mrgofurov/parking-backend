@@ -1,0 +1,9 @@
+.git
+.github
+.env
+.vscode
+.idea
+uploads
+parking.db
+firmware
+deploy

@@ -1,0 +1,22 @@
+[Unit]
+Description=Smart Parking device-agent (barrier commands + camera event forwarder)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=parking-agent
+Group=parking-agent
+ExecStart=/usr/local/bin/parking-agent -config /etc/parking-agent/agent.env
+Restart=always
+RestartSec=3
+StateDirectory=parking-agent
+# Hardening: the agent only needs the network and its queue directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/parking-agent
+
+[Install]
+WantedBy=multi-user.target

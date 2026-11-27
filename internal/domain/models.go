@@ -73,10 +73,15 @@ type Camera struct {
 	Source CameraSource `gorm:"default:'HIKVISION_ANPR'" json:"source"`
 	// BarrierID binds the camera to the barrier of its lane. When empty, the
 	// branch's first barrier with the same direction is used.
-	BarrierID     *uuid.UUID   `json:"barrier_id,omitempty"`
-	IPAddress     string       `json:"ip_address"`
-	RTSPUrl       string       `json:"rtsp_url"`
-	MinConfidence float64      `gorm:"default:0" json:"min_confidence"` // 0-100, events below are ignored
+	BarrierID     *uuid.UUID `json:"barrier_id,omitempty"`
+	IPAddress     string     `json:"ip_address"`
+	RTSPUrl       string     `json:"rtsp_url"`
+	MinConfidence float64    `gorm:"default:0" json:"min_confidence"` // 0-100, events below are ignored
+	// DisplayIP is the lane's Hikvision DS-TVL224 LED screen ("ip" or
+	// "ip:port"); empty = no LED screen on this lane.
+	DisplayIP string `json:"display_ip"`
+	// DisplayRows: 4 (DS-TVL224-4-5Y) or 2 (the "2 Rows" variant).
+	DisplayRows   int          `gorm:"default:4" json:"display_rows"`
 	Status        CameraStatus `gorm:"default:'ONLINE'" json:"status"`
 	LastHeartbeat time.Time    `json:"last_heartbeat"`
 	CreatedAt     time.Time    `json:"created_at"`
@@ -109,12 +114,32 @@ type Barrier struct {
 	// HIKVISION_IO needs a second relay output wired to the controller's CLOSE
 	// input; HTTP_RELAY needs a close URL. 0 / empty = the barrier closes by
 	// itself (loop detector / its own timer) and only the status is updated.
-	CloseOutputID   int        `gorm:"default:0" json:"close_output_id"`
-	CloseURL        string     `json:"close_url"`
-	AutoCloseSec    int        `gorm:"default:10" json:"auto_close_sec"`
+	CloseOutputID int    `gorm:"default:0" json:"close_output_id"`
+	CloseURL      string `json:"close_url"`
+	AutoCloseSec  int    `gorm:"default:10" json:"auto_close_sec"`
+	// AgentID: when set, the hardware commands above are executed by that
+	// device-agent on the parking's local network (the backend cannot reach
+	// the device itself, e.g. when it runs on a cloud server).
+	AgentID         *uuid.UUID `gorm:"type:uuid;index" json:"agent_id"`
 	LastTriggeredAt *time.Time `json:"last_triggered_at,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// Agent is a device-agent installed on a parking's local network. It keeps
+// an outbound WebSocket to the backend and executes barrier commands there.
+type Agent struct {
+	ID         uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	Name       string     `gorm:"not null" json:"name"`
+	BranchID   uuid.UUID  `gorm:"type:uuid;index" json:"branch_id"`
+	TokenHash  string     `gorm:"uniqueIndex;not null" json:"-"` // sha256 of the token; the token itself is shown once
+	Version    string     `json:"version"`
+	Hostname   string     `json:"hostname"`
+	RemoteAddr string     `json:"remote_addr"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	Online     bool       `gorm:"-" json:"online"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 func (b *Barrier) AfterFind(_ *gorm.DB) error {
@@ -254,6 +279,30 @@ type PaymentRequest struct {
 	LastCheckedAt     *time.Time           `json:"last_checked_at,omitempty"`
 	CreatedAt         time.Time            `json:"created_at"`
 	UpdatedAt         time.Time            `json:"updated_at"`
+}
+
+type ClickTransactionStatus string
+
+const (
+	ClickTxPrepared  ClickTransactionStatus = "PREPARED"
+	ClickTxConfirmed ClickTransactionStatus = "CONFIRMED"
+	ClickTxCancelled ClickTransactionStatus = "CANCELLED"
+)
+
+// ClickTransaction is one Click payment attempt for a PaymentRequest. Its ID
+// is the merchant_prepare_id / merchant_confirm_id returned to Click, so
+// Click's retries of the same click_trans_id get the same answer.
+type ClickTransaction struct {
+	ID               int64                  `gorm:"primaryKey;autoIncrement" json:"id"`
+	ClickTransID     int64                  `gorm:"uniqueIndex;not null" json:"click_trans_id"`
+	ClickPaydocID    int64                  `json:"click_paydoc_id"`
+	PaymentRequestID uuid.UUID              `gorm:"index" json:"payment_request_id"`
+	BillNumber       string                 `gorm:"index" json:"bill_number"`
+	Amount           float64                `json:"amount"`
+	Status           ClickTransactionStatus `gorm:"index" json:"status"`
+	Note             string                 `json:"note"`
+	CreatedAt        time.Time              `json:"created_at"`
+	UpdatedAt        time.Time              `json:"updated_at"`
 }
 
 type AuditLog struct {

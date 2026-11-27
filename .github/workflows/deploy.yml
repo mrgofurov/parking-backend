@@ -1,0 +1,121 @@
+name: Deploy
+
+# Tests, then deploys to the VPS: the code is copied with rsync to
+# $DEPLOY_PATH/parking-backend and started with docker compose there.
+#
+# Repository secrets: SSH_HOST, SSH_PORT, SSH_USER, SSH_KEY
+# Optional:           DEPLOY_PATH (default /var/www/smart-parking),
+#                     SSH_KNOWN_HOSTS (pinned host key; otherwise ssh-keyscan)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-parking-backend
+  cancel-in-progress: false
+
+env:
+  APP_DIR: parking-backend
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  deploy:
+    name: Deploy to VPS
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/var/www/smart-parking' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_KEY" ]; then
+            echo "::error::SSH_HOST, SSH_USER yoki SSH_KEY secret'i kiritilmagan"
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" > ~/.ssh/known_hosts
+          fi
+          cat > ~/.ssh/config <<EOF
+          Host deploy
+            HostName $SSH_HOST
+            Port $SSH_PORT
+            User $SSH_USER
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            ServerAliveInterval 30
+          EOF
+          ssh deploy "mkdir -p '$DEPLOY_PATH/$APP_DIR'"
+
+      - name: Copy code to the server
+        # .env and uploaded data stay on the server: excluded files are
+        # neither overwritten nor deleted by --delete.
+        run: |
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.env' \
+            --exclude 'uploads/' \
+            --exclude 'parking.db' \
+            --exclude '.vscode/' \
+            --exclude '.idea/' \
+            ./ "deploy:$DEPLOY_PATH/$APP_DIR/"
+
+      - name: Build and start
+        run: |
+          ssh deploy "DEPLOY_PATH='$DEPLOY_PATH' APP_DIR='$APP_DIR' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_PATH/$APP_DIR"
+
+          if [ ! -f .env ]; then
+            cp deploy/production.env.example .env
+            chmod 600 .env
+            echo "::error::$PWD/.env yo'q edi, namunadan yaratildi. Serverda POSTGRES_PASSWORD va JWT_SECRET ni to'ldirib, workflow'ni qayta ishga tushiring."
+            exit 1
+          fi
+
+          docker network inspect smart-parking >/dev/null 2>&1 || docker network create smart-parking
+          docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+          docker image prune -f >/dev/null
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8085/health >/dev/null 2>&1; then
+              echo "Backend ishlayapti: $(curl -fsS http://127.0.0.1:8085/health)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Backend 60 soniyada javob bermadi"
+          docker compose -f docker-compose.prod.yml ps
+          docker compose -f docker-compose.prod.yml logs --tail=100 backend
+          exit 1
+          REMOTE

@@ -7,6 +7,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/smart-parking/parking-backend/internal/config"
 	httpdelivery "github.com/smart-parking/parking-backend/internal/delivery/http"
+	"github.com/smart-parking/parking-backend/internal/pkg/ledscreen"
 	"github.com/smart-parking/parking-backend/internal/repository"
 	"github.com/smart-parking/parking-backend/internal/service"
 )
@@ -32,16 +33,18 @@ func main() {
 
 	// 4. Services
 	wsHub := service.NewWebSocketHub()
-	barrierSvc := service.NewBarrierService(repos.Barrier, wsHub)
+	agentHub := service.NewAgentHub(repos.Agent)
+	barrierSvc := service.NewBarrierService(repos.Barrier, wsHub, agentHub)
 	tariffSvc := service.NewTariffService(repos.Tariff)
-	displaySvc := service.NewDisplayService(wsHub)
+	displaySvc := service.NewDisplayService(wsHub, ledscreen.NewDriver)
 	sessionSvc := service.NewSessionService(repos, tariffSvc, barrierSvc, wsHub)
 	paymentSvc := service.NewPaymentService(repos, barrierSvc, displaySvc, wsHub)
 	qrSvc := service.NewQRPaymentService(cfg, repos, paymentSvc, displaySvc)
+	clickSvc := service.NewClickService(cfg, repos, qrSvc)
 	anprSvc := service.NewANPRService(cfg, repos, tariffSvc, barrierSvc, qrSvc, displaySvc, wsHub)
 	reportSvc := service.NewReportService(repos)
 
-	// Background watcher for Munis QR payments
+	// Background watcher for Munis QR payments and payment request expiry
 	go qrSvc.Run(context.Background())
 
 	services := &httpdelivery.Services{
@@ -54,6 +57,8 @@ func main() {
 		Report:    reportSvc,
 		Display:   displaySvc,
 		QRPayment: qrSvc,
+		Click:     clickSvc,
+		Agents:    agentHub,
 	}
 
 	// 5. Fiber App & Routes

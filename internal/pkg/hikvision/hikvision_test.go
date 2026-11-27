@@ -12,6 +12,7 @@ import (
 	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 )
 
 const sampleXML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -104,7 +105,8 @@ func TestParseJSONAndHeartbeat(t *testing.T) {
 // Fake ISAPI device enforcing Digest auth.
 func TestTriggerOutputDigest(t *testing.T) {
 	const user, pass, realm, nonce = "admin", "secret", "DS-2CD", "abc123"
-	var gotBody string
+	PulseDuration = time.Millisecond
+	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Digest ") {
@@ -122,7 +124,7 @@ func TestTriggerOutputDigest(t *testing.T) {
 			return
 		}
 		b, _ := io.ReadAll(r.Body)
-		gotBody = string(b)
+		bodies = append(bodies, string(b))
 		_, _ = w.Write([]byte(`<ResponseStatus><statusCode>1</statusCode></ResponseStatus>`))
 	}))
 	defer srv.Close()
@@ -130,8 +132,12 @@ func TestTriggerOutputDigest(t *testing.T) {
 	if err := NewClient(srv.URL, user, pass).TriggerOutput(1); err != nil {
 		t.Fatalf("trigger failed: %v", err)
 	}
-	if !strings.Contains(gotBody, "<outputState>high</outputState>") {
-		t.Fatalf("body not replayed after challenge: %q", gotBody)
+	// A pulse: "high" (body replayed after the Digest challenge), then "low"
+	// so the camera does not latch the relay closed.
+	if len(bodies) != 2 ||
+		!strings.Contains(bodies[0], "<outputState>high</outputState>") ||
+		!strings.Contains(bodies[1], "<outputState>low</outputState>") {
+		t.Fatalf("want high then low, got %q", bodies)
 	}
 	if err := NewClient(srv.URL, user, "wrong").TriggerOutput(1); err == nil {
 		t.Fatal("wrong password must fail")

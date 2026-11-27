@@ -33,6 +33,19 @@ type Config struct {
 	MunisQRApiURL    string
 	MunisQRAuthToken string
 	MunisOriginalQR  string
+
+	// Click (SHOP API + payment link). Mode: "live" | "mock" | "off".
+	// Empty = live when configured, else off.
+	ClickMode           string
+	ClickServiceID      string
+	ClickMerchantID     string
+	ClickMerchantUserID string
+	ClickSecretKey      string
+
+	// PublicPayURL is the phone payment page the static exit-lane QR sticker
+	// opens (e.g. https://parking.example.uz/pay). Click returns the driver to
+	// <PublicPayURL>/<camera code> after paying.
+	PublicPayURL string
 }
 
 func LoadConfig() *Config {
@@ -71,6 +84,14 @@ func LoadConfig() *Config {
 		MunisQRApiURL:    getEnv("MUNIS_QR_API_URL", ""),
 		MunisQRAuthToken: getEnv("MUNIS_QR_AUTH_TOKEN", ""),
 		MunisOriginalQR:  getEnv("MUNIS_ORIGINAL_QR", ""),
+
+		ClickMode:           getEnv("CLICK_MODE", ""),
+		ClickServiceID:      getEnv("CLICK_SERVICE_ID", ""),
+		ClickMerchantID:     getEnv("CLICK_MERCHANT_ID", ""),
+		ClickMerchantUserID: getEnv("CLICK_MERCHANT_USER_ID", ""),
+		ClickSecretKey:      getEnv("CLICK_SECRET_KEY", ""),
+
+		PublicPayURL: getEnv("PUBLIC_PAY_URL", ""),
 	}
 }
 

@@ -101,10 +101,43 @@ docker run -p 8080:8080 smart-parking-backend
 Kamera URL'dagi kod bo'yicha aniqlanadi. Kod bo'lmasa, hodisa ichidagi IP manzil bo'yicha aniqlanadi.
 
 ### Shlagbaum (kamera relay chiqishi)
-Boshqaruv turi `HIKVISION_IO` tanlanadi. So'ng kameraning IP manzili, login, paroli va relay chiqish raqami (odatda 1) kiritiladi. Backend `PUT /ISAPI/System/IO/outputs/{n}/trigger` buyrug'ini Digest auth bilan yuboradi. Kamerada Alarm Output'ni **pulse** rejimiga (1–3 soniya) sozlash kerak. Shlagbaum kontrolleri Hikvision'ning `barrierGate` buyrug'ini qo'llab-quvvatlasa, `HIKVISION_GATE` turini tanlang. Admin panelda **Tekshirish** tugmasi qurilma bilan aloqani va login to'g'riligini tekshiradi, **Ochish** tugmasi shlagbaumni hozir ochib ko'radi.
+Boshqaruv turi `HIKVISION_IO` tanlanadi. So'ng kameraning IP manzili, login, paroli va relay chiqish raqami (odatda 1) kiritiladi. Backend `PUT /ISAPI/System/IO/outputs/{n}/trigger` buyrug'ini Digest auth bilan yuboradi: avval `high`, 1 soniyadan keyin `low`, ya'ni bitta impuls. Kamera ISAPI orqali kelgan `high`ni Alarm Output'dagi Delay sozlamasiga qaramay `low` kelguncha ushlab turadi, shuning uchun `low` backendning o'zi yuboradi. Kamerada qo'shimcha sozlash shart emas. Simni kameraning alarm chiqishidan (NO/COM) shlagbaum kontrollerining OPEN kirishiga ulang. Shlagbaum kontrolleri Hikvision'ning `barrierGate` buyrug'ini qo'llab-quvvatlasa, `HIKVISION_GATE` turini tanlang. Admin panelda **Tekshirish** tugmasi qurilma bilan aloqani va login to'g'riligini tekshiradi, **Ochish** tugmasi shlagbaumni hozir ochib ko'radi.
 
 ### Yo'lak monitori
 Brauzerda `http://<admin-manzil>/display?camera=cam-exit` sahifasini to'liq ekran (kiosk) rejimida oching. Sahifa login so'ramaydi va WebSocket orqali real vaqtda yangilanadi.
+
+### Hikvision LED ekran (DS-TVL224)
+Kameraga `display_ip` (ekran IP manzili, standart `192.168.1.99`) va `display_rows` (`4` yoki `2`) kiritilsa, o'sha yo'lak holati LED ekranga ham chiqadi. Ekranda 64×64 piksel bor, har qatorga 8 ta lotin belgisi sig'adi, ranglar qizil, yashil va sariq. Chiqishda summa ko'rsatiladigan maket:
+
+```
+01A123BC   (sariq)  davlat raqami
+2:35       (yashil) turgan vaqti
+12 000     (qizil)  summa
+SO'M       (qizil)
+```
+
+> Ekranning tarmoq protokoli hali ulanmagan. Hozircha backend ekranga chiqishi kerak bo'lgan matnni faqat logga yozadi (`[LED 192.168.1.99] [...]`). Protokol aniqlangach, `internal/pkg/ledscreen` paketiga haqiqiy drayver qo'shiladi.
+
+### Telefon orqali to'lov (doimiy QR stiker + Click)
+LED ekran QR chiqara olmaydi. Shuning uchun har bir chiqish yo'lagiga doimiy QR stiker yopishtiriladi, u `<PUBLIC_PAY_URL>/<kamera kodi>` sahifasini ochadi (masalan `https://parking.example.uz/pay/cam-exit`). Sahifa (frontend) ma'lumotni `GET /api/v1/pay/:camera` dan oladi:
+
+| `state` | Ma'nosi | Sahifa nima ko'rsatadi |
+|---|---|---|
+| `PAYABLE` | Summa qotirilgan, Click havolasi tayyor | Raqam, vaqt, summa va `click_url` ga olib boruvchi **"Click orqali to'lash"** tugmasi |
+| `CASHIER` | To'lov kerak, lekin onlayn to'lov mavjud emas | `message` (kassada to'lash) |
+| `PAID` / `FREE` | Yo'l ochiq | `message` |
+| boshqalar (`IDLE`, ...) | Yo'lakda to'lov kutilayotgan mashina yo'q | `message` |
+
+`click_mode` = `mock` bo'lsa, tugma Click o'rniga `POST /api/v1/click/mock-pay/:bill_number` ni chaqiradi (sinov).
+
+**Click oqimi:** havoladagi `transaction_param` — to'lov so'rovining `bill_number`i. Click to'lovni `POST /api/v1/click/prepare` va `POST /api/v1/click/complete` ga yuboradi (SHOP API, `sign_string` md5 bilan tekshiriladi). `Complete` kelishi bilan sessiya yopiladi, shlagbaum ochiladi va LED'da "TO'LANDI" chiqadi. Agar shu orada mashina kassada to'lagan bo'lsa, Click'ga `-9` qaytariladi va Click pulni qaytaradi.
+
+**Click'ni ishga tushirish uchun:**
+1. Click bilan merchant shartnomasi tuziladi. Ular `CLICK_SERVICE_ID`, `CLICK_MERCHANT_ID`, `CLICK_MERCHANT_USER_ID` va `CLICK_SECRET_KEY` ni beradi.
+2. Click'ga Prepare va Complete URL'lari beriladi: `https://<domen>/api/v1/click/prepare` va `https://<domen>/api/v1/click/complete`. Backend internetdan HTTPS orqali ochiq bo'lishi shart.
+3. `.env` da `CLICK_MODE=live` va `PUBLIC_PAY_URL` to'ldiriladi.
+
+Munis o'chiq (`MUNIS_MODE=off`) bo'lsa ham Click ishlaydi: to'lov so'rovi QR'siz yaratiladi va faqat Click orqali to'lanadi.
 
 ### Munis sozlamalari (`.env`)
 `MUNIS_MODE` qiymatlari:
@@ -113,3 +146,11 @@ Brauzerda `http://<admin-manzil>/display?camera=cam-exit` sahifasini to'liq ekra
 - `off` — QR ko'rsatilmaydi, faqat kassa.
 
 `live` uchun kerakli sozlamalar: `MUNIS_QR_API_URL`, `MUNIS_QR_AUTH_TOKEN` (QR yaratish), `MUNIS_API_URL`, `MUNIS_API_USERNAME`, `MUNIS_API_PASSWORD` (to'lovni tekshirish). To'lovni tekshirish API'si bank tarmog'ida joylashgan, shuning uchun parking serveridan unga IPsec tunnel orqali kirish bo'lishi shart. To'liq ro'yxat `.env.example` faylida.
+
+## Device-agent (backend bulutda, uskunalar parkovkada)
+
+Backend parkovka tarmog'idan tashqarida (masalan chet eldagi VPS'da) ishlasa, parkovkadagi kichik kompyuterga `cmd/device-agent` o'rnatiladi. U backendga o'zi ulanadi, shlagbaum buyruqlarini lokal tarmoqda bajaradi va kamera hodisalarini navbat bilan bulutga uzatadi. Shlagbaumga `agent_id` berilsa, uning buyruqlari agent orqali ketadi. O'rnatish: [deploy/device-agent/README.md](deploy/device-agent/README.md).
+
+## VPS'ga deploy (GitHub Actions)
+
+`master`ga push qilinganda `.github/workflows/deploy.yml` testlarni o'tkazadi va kodni serverga ko'chirib, `docker-compose.prod.yml` (PostgreSQL va backend) bilan ishga tushiradi. Serverni bir marta tayyorlash, secret'lar va birinchi deploy tartibi: [deploy/SERVER.md](deploy/SERVER.md).

@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/smart-parking/parking-backend/internal/domain"
+	"github.com/smart-parking/parking-backend/internal/pkg/ledscreen"
 )
 
 // Display states shown on the customer-facing lane monitor.
@@ -46,19 +47,27 @@ type DisplayState struct {
 
 // DisplayService keeps the latest state per lane (camera) in memory and pushes
 // changes over WebSocket. Terminal states fall back to IDLE automatically.
+// Lanes whose camera has DisplayIP also get the state on their LED screen.
 type DisplayService struct {
 	hub    *WebSocketHub
+	led    *ledSink
 	mu     sync.Mutex
 	states map[uuid.UUID]*DisplayState
 	timers map[uuid.UUID]*time.Timer
 }
 
-func NewDisplayService(hub *WebSocketHub) *DisplayService {
-	return &DisplayService{
+// NewDisplayService: newLEDDriver builds the driver for a lane's LED screen
+// (normally ledscreen.NewDriver); nil disables LED output.
+func NewDisplayService(hub *WebSocketHub, newLEDDriver func(addr string) ledscreen.Driver) *DisplayService {
+	d := &DisplayService{
 		hub:    hub,
 		states: map[uuid.UUID]*DisplayState{},
 		timers: map[uuid.UUID]*time.Timer{},
 	}
+	if newLEDDriver != nil {
+		d.led = newLEDSink(newLEDDriver)
+	}
+	return d
 }
 
 func idleAfter(state string) time.Duration {
@@ -106,7 +115,10 @@ func (d *DisplayService) Set(cam *domain.Camera, st DisplayState) {
 	}
 	d.mu.Unlock()
 
-	d.hub.Broadcast(WSEventDisplay, st)
+	d.led.push(cam, st)
+	if d.hub != nil {
+		d.hub.Broadcast(WSEventDisplay, st)
+	}
 }
 
 // Get returns the current state of a lane (IDLE if nothing happened yet).

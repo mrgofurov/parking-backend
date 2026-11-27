@@ -3,3 +3,5 @@
 .idea/
 .uploads/
 uploads/
+# ESP8266 barrier relay: Wi-Fi password and token
+firmware/barrier-relay/config.h

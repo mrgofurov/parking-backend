@@ -7,10 +7,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"github.com/smart-parking/parking-backend/internal/domain"
+	"github.com/smart-parking/parking-backend/internal/pkg/hikvision"
 	"github.com/smart-parking/parking-backend/internal/repository"
 	"gorm.io/gorm"
 )
@@ -52,6 +54,7 @@ func (f *fakeISAPI) count() int {
 
 func newBarrierTestSvc(t *testing.T) (BarrierService, repository.BarrierRepository) {
 	t.Helper()
+	hikvision.PulseDuration = time.Millisecond
 	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +63,7 @@ func newBarrierTestSvc(t *testing.T) (BarrierService, repository.BarrierReposito
 		t.Fatal(err)
 	}
 	repo := repository.NewBarrierRepository(db)
-	return NewBarrierService(repo, NewWebSocketHub()), repo
+	return NewBarrierService(repo, NewWebSocketHub(), nil), repo
 }
 
 func addBarrier(t *testing.T, repo repository.BarrierRepository, b domain.Barrier) uuid.UUID {
@@ -151,5 +154,58 @@ func TestBarrierDeviceErrorKeepsStatusAndReturnsError(t *testing.T) {
 	}
 	if status(t, repo, id) != domain.BarrierClosed {
 		t.Fatal("status must stay CLOSED when the device did not accept the command")
+	}
+}
+
+func waitForStatus(t *testing.T, repo repository.BarrierRepository, id uuid.UUID, want domain.BarrierStatus) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if status(t, repo, id) == want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("status never became %s", want)
+}
+
+// A controller without its own timer (open/close relay, no loop detector)
+// must be sent the close command when the auto-close timer fires.
+func TestAutoCloseSendsCloseURLWhenConfigured(t *testing.T) {
+	dev := &fakeISAPI{}
+	srv := httptest.NewServer(http.HandlerFunc(dev.handler))
+	defer srv.Close()
+	svc, repo := newBarrierTestSvc(t)
+	id := addBarrier(t, repo, domain.Barrier{ControlType: domain.BarrierControlHTTPRelay,
+		RelayURL: srv.URL + "/relay/1", CloseURL: srv.URL + "/relay/2", AutoCloseSec: 1})
+
+	if err := svc.OpenBarrier(id, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(dev.last(), "POST /relay/1") {
+		t.Fatalf("open: last=%q", dev.last())
+	}
+	waitForStatus(t, repo, id, domain.BarrierClosed)
+	if !strings.HasPrefix(dev.last(), "POST /relay/2") || dev.count() != 2 {
+		t.Fatalf("auto-close: hits=%d last=%q", dev.count(), dev.last())
+	}
+}
+
+// Without a close channel the barrier closes itself: the timer only resets the
+// status and sends nothing.
+func TestAutoCloseWithoutCloseChannelOnlyUpdatesStatus(t *testing.T) {
+	dev := &fakeISAPI{}
+	srv := httptest.NewServer(http.HandlerFunc(dev.handler))
+	defer srv.Close()
+	svc, repo := newBarrierTestSvc(t)
+	id := addBarrier(t, repo, domain.Barrier{ControlType: domain.BarrierControlHTTPRelay,
+		RelayURL: srv.URL + "/relay/1", AutoCloseSec: 1})
+
+	if err := svc.OpenBarrier(id, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, repo, id, domain.BarrierClosed)
+	if dev.count() != 1 {
+		t.Fatalf("expected only the open request, got %d hits", dev.count())
 	}
 }

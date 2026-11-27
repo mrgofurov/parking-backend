@@ -1,18 +1,18 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
-	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/smart-parking/parking-backend/internal/domain"
-	"github.com/smart-parking/parking-backend/internal/pkg/hikvision"
+	"github.com/smart-parking/parking-backend/internal/pkg/agentproto"
+	"github.com/smart-parking/parking-backend/internal/pkg/barrierctl"
 	"github.com/smart-parking/parking-backend/internal/repository"
 )
 
@@ -29,6 +29,9 @@ type CreateBarrierRequest struct {
 	CloseOutputID  int                       `json:"close_output_id"`
 	CloseURL       string                    `json:"close_url"`
 	AutoCloseSec   int                       `json:"auto_close_sec"`
+	// AgentID: nil = unchanged (update) / none (create), "" = unbind,
+	// otherwise the device-agent that executes this barrier's commands.
+	AgentID *string `json:"agent_id"`
 }
 
 // CloseResult tells the operator whether a physical close command was sent.
@@ -61,57 +64,63 @@ type BarrierService interface {
 type barrierService struct {
 	repo       repository.BarrierRepository
 	hub        *WebSocketHub
+	agents     AgentExecutor // nil = no device-agents
 	timers     map[uuid.UUID]*time.Timer
 	timersLock sync.Mutex
 }
 
-func NewBarrierService(repo repository.BarrierRepository, hub *WebSocketHub) BarrierService {
+// agentCommandTimeout covers a Hikvision pulse (1 s) plus its retries.
+const agentCommandTimeout = 20 * time.Second
+
+func NewBarrierService(repo repository.BarrierRepository, hub *WebSocketHub, agents AgentExecutor) BarrierService {
 	return &barrierService{
 		repo:   repo,
 		hub:    hub,
+		agents: agents,
 		timers: make(map[uuid.UUID]*time.Timer),
 	}
+}
+
+func specFromBarrier(b *domain.Barrier) barrierctl.Spec {
+	return barrierctl.Spec{
+		Name:          b.Name,
+		Type:          string(b.ControlType),
+		RelayURL:      b.RelayURL,
+		CloseURL:      b.CloseURL,
+		Host:          b.DeviceHost,
+		Username:      b.DeviceUsername,
+		Password:      b.DevicePassword,
+		OutputID:      b.OutputID,
+		CloseOutputID: b.CloseOutputID,
+	}
+}
+
+// viaAgent reports whether the barrier's commands go through a device-agent.
+func (s *barrierService) viaAgent(b *domain.Barrier) bool {
+	return b.AgentID != nil && *b.AgentID != uuid.Nil && s.agents != nil
+}
+
+func (s *barrierService) runOnAgent(b *domain.Barrier, op string) (agentproto.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), agentCommandTimeout)
+	defer cancel()
+	res, err := s.agents.Execute(ctx, *b.AgentID, op, specFromBarrier(b))
+	if err != nil {
+		return res, fmt.Errorf("agent orqali: %w", err)
+	}
+	return res, nil
 }
 
 // triggerHardware sends the physical "open" command. It is synchronous so the
 // caller knows whether the barrier really received the command.
 func (s *barrierService) triggerHardware(b *domain.Barrier) error {
-	switch b.ControlType {
-	case domain.BarrierControlNone:
-		return nil
-	case domain.BarrierControlHikvisionIO, domain.BarrierControlHikvisionGate:
-		if b.DeviceHost == "" {
-			return errors.New("qurilma manzili (device_host) kiritilmagan")
-		}
-		cli := hikvision.NewClient(b.DeviceHost, b.DeviceUsername, b.DevicePassword)
-		var err error
-		for attempt := 1; attempt <= 2; attempt++ {
-			if b.ControlType == domain.BarrierControlHikvisionGate {
-				err = cli.OpenBarrierGate(b.OutputID)
-			} else {
-				err = cli.TriggerOutput(b.OutputID)
-			}
-			if err == nil {
-				return nil
-			}
-			log.Printf("[Barrier] %s: ISAPI urinish %d muvaffaqiyatsiz: %v\n", b.Name, attempt, err)
-		}
-		return err
-	default: // HTTP_RELAY
-		if b.RelayURL == "" {
-			return errors.New("relay URL kiritilmagan")
-		}
-		client := http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Post(b.RelayURL, "application/json", nil)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			return fmt.Errorf("relay HTTP %d qaytardi", resp.StatusCode)
-		}
+	if b.ControlType == domain.BarrierControlNone {
 		return nil
 	}
+	if s.viaAgent(b) {
+		_, err := s.runOnAgent(b, agentproto.OpOpen)
+		return err
+	}
+	return barrierctl.Open(specFromBarrier(b))
 }
 
 func (s *barrierService) OpenBarrier(barrierID uuid.UUID, reason string) error {
@@ -154,13 +163,20 @@ func (s *barrierService) OpenBarrier(barrierID uuid.UUID, reason string) error {
 		t.Stop()
 	}
 
-	// Auto-close: the physical barrier closes itself (loop detector / timer);
-	// this only resets the software status.
+	// Auto-close. A barrier with its own close channel (a close relay output or
+	// a close URL) is sent the close command, because its controller has no
+	// timer of its own. Otherwise the barrier closes itself (loop detector /
+	// its own timer) and only the software status is reset.
 	autoSec := barrier.AutoCloseSec
 	if autoSec <= 0 {
 		autoSec = 10
 	}
 	s.timers[barrierID] = time.AfterFunc(time.Duration(autoSec)*time.Second, func() {
+		b, err := s.repo.GetByID(barrierID)
+		if err == nil && hasCloseChannel(b) {
+			_, _ = s.CloseBarrier(barrierID, "auto_close")
+			return
+		}
 		_ = s.markClosed(barrierID, "auto_close")
 	})
 	s.timersLock.Unlock()
@@ -169,39 +185,22 @@ func (s *barrierService) OpenBarrier(barrierID uuid.UUID, reason string) error {
 	return nil
 }
 
+// hasCloseChannel reports whether a dedicated close command is configured.
+func hasCloseChannel(b *domain.Barrier) bool {
+	return barrierctl.HasCloseChannel(specFromBarrier(b))
+}
+
 // triggerHardwareClose sends the physical close command if the barrier has
 // one configured. sent=false means the barrier closes by itself.
 func (s *barrierService) triggerHardwareClose(b *domain.Barrier) (bool, error) {
-	switch b.ControlType {
-	case domain.BarrierControlHikvisionGate:
-		if b.DeviceHost == "" {
-			return false, errors.New("qurilma manzili (device_host) kiritilmagan")
+	if s.viaAgent(b) {
+		if b.ControlType != domain.BarrierControlHikvisionGate && !hasCloseChannel(b) {
+			return false, nil // nothing to send: no need to bother the agent
 		}
-		return true, hikvision.NewClient(b.DeviceHost, b.DeviceUsername, b.DevicePassword).CloseBarrierGate(b.OutputID)
-	case domain.BarrierControlHikvisionIO:
-		if b.CloseOutputID <= 0 {
-			return false, nil
-		}
-		if b.DeviceHost == "" {
-			return false, errors.New("qurilma manzili (device_host) kiritilmagan")
-		}
-		return true, hikvision.NewClient(b.DeviceHost, b.DeviceUsername, b.DevicePassword).TriggerOutput(b.CloseOutputID)
-	case domain.BarrierControlHTTPRelay:
-		if b.CloseURL == "" {
-			return false, nil
-		}
-		client := http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Post(b.CloseURL, "application/json", nil)
-		if err != nil {
-			return true, err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			return true, fmt.Errorf("relay HTTP %d qaytardi", resp.StatusCode)
-		}
-		return true, nil
+		res, err := s.runOnAgent(b, agentproto.OpClose)
+		return err != nil || res.Sent, err
 	}
-	return false, nil
+	return barrierctl.Close(specFromBarrier(b))
 }
 
 func (s *barrierService) CloseBarrier(barrierID uuid.UUID, reason string) (*CloseResult, error) {
@@ -324,6 +323,10 @@ func (s *barrierService) CreateBarrier(req CreateBarrierRequest) (*domain.Barrie
 	if req.OutputID <= 0 {
 		req.OutputID = 1
 	}
+	agentID, _, err := parseAgentID(req.AgentID)
+	if err != nil {
+		return nil, err
+	}
 
 	barrier := &domain.Barrier{
 		ID:             uuid.New(),
@@ -339,6 +342,7 @@ func (s *barrierService) CreateBarrier(req CreateBarrierRequest) (*domain.Barrie
 		CloseOutputID:  req.CloseOutputID,
 		CloseURL:       req.CloseURL,
 		AutoCloseSec:   req.AutoCloseSec,
+		AgentID:        agentID,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}
@@ -396,6 +400,11 @@ func (s *barrierService) UpdateBarrier(id uuid.UUID, req UpdateBarrierRequest) (
 	if req.AutoCloseSec > 0 {
 		barrier.AutoCloseSec = req.AutoCloseSec
 	}
+	if agentID, given, err := parseAgentID(req.AgentID); err != nil {
+		return nil, err
+	} else if given {
+		barrier.AgentID = agentID
+	}
 	barrier.UpdatedAt = time.Now()
 
 	if err := s.repo.Update(barrier); err != nil {
@@ -438,104 +447,41 @@ func (s *barrierService) PingBarrier(id uuid.UUID) (map[string]interface{}, erro
 	if err != nil {
 		return nil, err
 	}
-
-	if barrier.ControlType == domain.BarrierControlNone {
-		return map[string]interface{}{
-			"status":   "SOFTWARE",
-			"ping_ms":  0,
-			"is_alive": true,
-			"message":  "Dasturiy rejim: qurilma ulanmagan",
-		}, nil
+	if barrier.ControlType == domain.BarrierControlNone || !s.viaAgent(barrier) {
+		return barrierctl.Ping(specFromBarrier(barrier)).ToMap(), nil
 	}
 
-	if barrier.ControlType == domain.BarrierControlHikvisionIO || barrier.ControlType == domain.BarrierControlHikvisionGate {
-		if barrier.DeviceHost == "" {
-			return map[string]interface{}{"status": "NO_URL", "ping_ms": 0, "is_alive": false,
-				"message": "Qurilma manzili (device_host) kiritilmagan"}, nil
-		}
-		start := time.Now()
-		_, err := hikvision.NewClient(barrier.DeviceHost, barrier.DeviceUsername, barrier.DevicePassword).DeviceInfo()
-		ms := time.Since(start).Milliseconds()
-		if err != nil {
-			return map[string]interface{}{"status": "OFFLINE", "ping_ms": ms, "is_alive": false,
-				"message": "Hikvision qurilmasiga ulanib bo'lmadi: " + err.Error()}, nil
-		}
-		return map[string]interface{}{"status": "ONLINE", "ping_ms": ms, "is_alive": true,
-			"message": fmt.Sprintf("Hikvision ISAPI aloqasi va login to'g'ri (%d ms)", ms)}, nil
+	if !s.agents.IsOnline(*barrier.AgentID) {
+		return map[string]interface{}{"status": "AGENT_OFFLINE", "ping_ms": 0, "is_alive": false, "via_agent": true,
+			"message": "Parkovkadagi device-agent ulanmagan (oflayn)"}, nil
 	}
-
-	if barrier.RelayURL == "" {
-		return map[string]interface{}{
-			"status":   "NO_URL",
-			"ping_ms":  0,
-			"is_alive": false,
-			"message":  "Hardware Relay URL kiritilmagan",
-		}, nil
-	}
-
 	start := time.Now()
-
-	// 1. Try HTTP probe if it's an HTTP URL
-	client := http.Client{Timeout: 1500 * time.Millisecond}
-	req, err := http.NewRequest("HEAD", barrier.RelayURL, nil)
-	var resp *http.Response
-	if err == nil {
-		resp, err = client.Do(req)
-	}
-
-	latency := time.Since(start).Milliseconds()
-	if latency == 0 {
-		latency = 1
-	}
-
-	if err == nil && resp != nil {
-		defer resp.Body.Close()
-		return map[string]interface{}{
-			"status":      "ONLINE",
-			"ping_ms":     latency,
-			"relay_url":   barrier.RelayURL,
-			"status_code": resp.StatusCode,
-			"is_alive":    true,
-			"message":     fmt.Sprintf("Relay aloqasi barqaror (%d ms)", latency),
-		}, nil
-	}
-
-	// 2. Fallback to TCP Socket probe
-	target := barrier.RelayURL
-	if strings.HasPrefix(target, "http://") {
-		target = strings.TrimPrefix(target, "http://")
-	} else if strings.HasPrefix(target, "https://") {
-		target = strings.TrimPrefix(target, "https://")
-	}
-	if idx := strings.Index(target, "/"); idx != -1 {
-		target = target[:idx]
-	}
-	if !strings.Contains(target, ":") {
-		target += ":80"
-	}
-
-	tcpStart := time.Now()
-	conn, tcpErr := net.DialTimeout("tcp", target, 1200*time.Millisecond)
-	if tcpErr == nil {
-		conn.Close()
-		tcpLatency := time.Since(tcpStart).Milliseconds()
-		if tcpLatency == 0 {
-			tcpLatency = 1
+	res, err := s.runOnAgent(barrier, agentproto.OpPing)
+	if err != nil || res.Ping == nil {
+		msg := "agent javob bermadi"
+		if err != nil {
+			msg = err.Error()
 		}
-		return map[string]interface{}{
-			"status":    "ONLINE",
-			"ping_ms":   tcpLatency,
-			"relay_url": barrier.RelayURL,
-			"is_alive":  true,
-			"message":   fmt.Sprintf("Relay porti ochiq (%d ms)", tcpLatency),
-		}, nil
+		return map[string]interface{}{"status": "OFFLINE", "ping_ms": time.Since(start).Milliseconds(), "is_alive": false,
+			"via_agent": true, "message": msg}, nil
 	}
+	m := res.Ping.ToMap()
+	m["via_agent"] = true
+	m["message"] = "Agent orqali: " + res.Ping.Message
+	return m, nil
+}
 
-	return map[string]interface{}{
-		"status":    "OFFLINE",
-		"ping_ms":   latency,
-		"relay_url": barrier.RelayURL,
-		"is_alive":  false,
-		"message":   "Relay kontrolleriga ulanib bo'lmadi (Aloqa yo'q)",
-	}, nil
+// parseAgentID: nil = not given, "" = unbind.
+func parseAgentID(v *string) (id *uuid.UUID, given bool, err error) {
+	if v == nil {
+		return nil, false, nil
+	}
+	if strings.TrimSpace(*v) == "" {
+		return nil, true, nil
+	}
+	u, err := uuid.Parse(strings.TrimSpace(*v))
+	if err != nil {
+		return nil, true, errors.New("agent_id noto'g'ri")
+	}
+	return &u, true, nil
 }

@@ -24,6 +24,8 @@ type Handlers struct {
 	Camera  *handler.CameraHandler
 	Report  *handler.ReportHandler
 	Display *handler.DisplayHandler
+	Pay     *handler.PayHandler
+	Agent   *handler.AgentHandler
 	WS      *handler.WSHandler
 }
 
@@ -60,7 +62,10 @@ func SetupRoutes(
 		Camera:  handler.NewCameraHandler(repos.Camera, repos.Branch),
 		Report:  handler.NewReportHandler(services.Report, repos.Branch),
 		Display: handler.NewDisplayHandler(services.ANPR, services.Display, services.QRPayment, repos.Camera, repos.Branch),
-		WS:      handler.NewWSHandler(services.Hub),
+		Pay: handler.NewPayHandler(cfg, services.ANPR, services.Display, services.Click,
+			repos.PaymentRequest, repos.Branch),
+		Agent: handler.NewAgentHandler(repos.Agent, services.Agents),
+		WS:    handler.NewWSHandler(services.Hub),
 	}
 
 	// Health check
@@ -73,6 +78,9 @@ func SetupRoutes(
 
 	api := app.Group("/api/v1")
 
+	// Device-agents on parking LANs connect here (agent token, not JWT)
+	api.Get("/agent/ws", h.Agent.Upgrade(), h.Agent.HandleWS())
+
 	// Public Auth & device webhooks (protected by ANPR_WEBHOOK_TOKEN when set)
 	api.Post("/auth/login", h.Auth.Login)
 	api.Post("/anpr/event", h.ANPR.HandleEvent)
@@ -84,6 +92,13 @@ func SetupRoutes(
 	// Customer-facing lane display (gate monitor has no login)
 	api.Get("/display", h.Display.ListLanes)
 	api.Get("/display/:camera", h.Display.GetLaneState)
+
+	// Phone payment page behind the static exit QR sticker + Click SHOP API
+	// callbacks (authenticated by sign_string, not JWT)
+	api.Get("/pay/:camera", h.Pay.GetPayInfo)
+	api.Post("/click/prepare", h.Pay.ClickPrepare)
+	api.Post("/click/complete", h.Pay.ClickComplete)
+	api.Post("/click/mock-pay/:bill", h.Pay.ClickMockPay) // CLICK_MODE=mock only
 
 	// Protected Endpoints
 	authMW := middleware.AuthMiddleware(cfg.JWTSecret)
@@ -144,6 +159,13 @@ func SetupRoutes(
 	protected.Post("/barriers/:id/close", h.Barrier.CloseBarrier)
 	protected.Post("/barriers/:id/car-passed", h.Barrier.CarPassed)
 
+	// Device-agents (admin)
+	protected.Get("/agents", h.Agent.ListAgents)
+	protected.Post("/agents", adminMW, h.Agent.CreateAgent)
+	protected.Put("/agents/:id", adminMW, h.Agent.UpdateAgent)
+	protected.Post("/agents/:id/rotate-token", adminMW, h.Agent.RotateToken)
+	protected.Delete("/agents/:id", adminMW, h.Agent.DeleteAgent)
+
 	// Cameras
 	protected.Get("/cameras", h.Camera.ListCameras)
 	protected.Post("/cameras", adminMW, h.Camera.CreateCamera)
@@ -177,4 +199,6 @@ type Services struct {
 	Report    service.ReportService
 	Display   *service.DisplayService
 	QRPayment service.QRPaymentService
+	Click     service.ClickService
+	Agents    *service.AgentHub
 }

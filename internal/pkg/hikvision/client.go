@@ -53,15 +53,36 @@ func checkStatus(status int, body string) error {
 	return nil
 }
 
-// TriggerOutput fires an alarm/relay output. The output should be configured
-// on the camera as a pulse (e.g. 1-5s) so "high" produces one open pulse for
-// the barrier controller.
+// PulseDuration is how long TriggerOutput keeps the relay closed. Barrier
+// controllers' OPEN inputs react to a short dry-contact pulse.
+var PulseDuration = time.Second
+
+// TriggerOutput closes an alarm/relay output for PulseDuration and then opens
+// it again. Hikvision cameras latch an ISAPI "high" until "low" is sent: the
+// output's Delay setting in the web UI does not apply to it (verified on a
+// Hikvision PTZ test camera), so without the "low" the barrier would be held
+// open.
 func (c *Client) TriggerOutput(outputID int) error {
 	if outputID <= 0 {
 		outputID = 1
 	}
+	if err := c.setOutput(outputID, "high"); err != nil {
+		return err
+	}
+	time.Sleep(PulseDuration)
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err = c.setOutput(outputID, "low"); err == nil {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("relay #%d yoqildi, lekin o'chirib bo'lmadi (yoqilgancha qoldi): %w", outputID, err)
+}
+
+func (c *Client) setOutput(outputID int, state string) error {
 	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>` +
-		`<IOPortData version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema"><outputState>high</outputState></IOPortData>`)
+		`<IOPortData version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema"><outputState>` + state + `</outputState></IOPortData>`)
 	status, resp, err := c.do(http.MethodPut, fmt.Sprintf("/ISAPI/System/IO/outputs/%d/trigger", outputID), body)
 	if err != nil {
 		return err

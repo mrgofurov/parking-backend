@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -8,6 +9,7 @@ import (
 	"github.com/smart-parking/parking-backend/internal/domain"
 	"github.com/smart-parking/parking-backend/internal/pkg/response"
 	"github.com/smart-parking/parking-backend/internal/repository"
+	"github.com/smart-parking/parking-backend/internal/service"
 )
 
 type CameraHandler struct {
@@ -45,6 +47,8 @@ type CameraDTO struct {
 	IPAddress     string               `json:"ip_address"`
 	RTSPUrl       string               `json:"rtsp_url"`
 	MinConfidence float64              `json:"min_confidence"`
+	DisplayIP     string               `json:"display_ip"`
+	DisplayRows   int                  `json:"display_rows"`
 	BranchID      *uuid.UUID           `json:"branch_id"`
 }
 
@@ -106,6 +110,8 @@ func (h *CameraHandler) CreateCamera(c *fiber.Ctx) error {
 		IPAddress:     dto.IPAddress,
 		RTSPUrl:       dto.RTSPUrl,
 		MinConfidence: dto.MinConfidence,
+		DisplayIP:     strings.TrimSpace(dto.DisplayIP),
+		DisplayRows:   service.NormalizeLEDRows(dto.DisplayRows),
 		Status:        domain.CameraStatusOnline,
 		LastHeartbeat: time.Now(),
 		CreatedAt:     time.Now(),
@@ -168,6 +174,8 @@ func (h *CameraHandler) UpdateCamera(c *fiber.Ctx) error {
 	cam.IPAddress = dto.IPAddress
 	cam.RTSPUrl = dto.RTSPUrl
 	cam.MinConfidence = dto.MinConfidence
+	cam.DisplayIP = strings.TrimSpace(dto.DisplayIP)
+	cam.DisplayRows = service.NormalizeLEDRows(dto.DisplayRows)
 	if dto.BranchID != nil {
 		cam.BranchID = *dto.BranchID
 	}
