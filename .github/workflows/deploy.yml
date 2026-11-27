@@ -24,7 +24,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v5
         with:
@@ -46,7 +46,7 @@ jobs:
       SSH_USER: ${{ secrets.SSH_USER }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/var/www/smart-parking' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up SSH
         env:
@@ -75,6 +75,16 @@ jobs:
             ServerAliveInterval 30
           EOF
           ssh deploy "mkdir -p '$DEPLOY_PATH/$APP_DIR'"
+
+      - name: Make sure rsync is on the server
+        run: |
+          if ssh deploy 'command -v rsync' >/dev/null; then exit 0; fi
+          echo "Serverda rsync yo'q, o'rnatilmoqda"
+          if ! ssh deploy 'if [ "$(id -u)" = 0 ]; then SUDO=; else SUDO="sudo -n"; fi
+            $SUDO apt-get update -qq && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync'; then
+            echo "::error::Serverda rsync o'rnatilmagan va uni o'rnatib bo'lmadi. Serverda bajaring: sudo apt-get install -y rsync"
+            exit 1
+          fi
 
       - name: Copy code to the server
         # .env and uploaded data stay on the server: excluded files are
